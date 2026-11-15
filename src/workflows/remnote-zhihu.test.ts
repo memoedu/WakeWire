@@ -348,6 +348,41 @@ describe("RemNote to Zhihu publishing", () => {
     expect(f.posts()).toBe(0);
     expect(f.state.receipts).toHaveLength(0);
   });
+  it("binds the AI tag into freshness checks without hashing unrelated completion tags", async () => {
+    const f = fixture();
+    const child = f.nodes.get("child") as ArticleRem;
+    child.tags = [{ tagRemId: "ai-tag", name: "AI Generated" }];
+    const before = await snapshotArticle(f.remnote, "one", false, "ai-tag");
+    child.tags.push({ tagRemId: "other", name: "Other" });
+    expect((await snapshotArticle(f.remnote, "one", false, "ai-tag")).fingerprint).toBe(
+      before.fingerprint,
+    );
+    child.tags = [];
+    expect((await snapshotArticle(f.remnote, "one", false, "ai-tag")).fingerprint).not.toBe(
+      before.fingerprint,
+    );
+    child.tags = [{ tagRemId: "ai-tag", name: "AI Generated" }];
+    f.publisher.check = async () => {
+      child.tags = [];
+      return { id: "account", name: "Author", urlToken: "author", columnId: "col" };
+    };
+    await expect(runArticles({ ...f.options, aiGeneratedTagRemId: "ai-tag" })).rejects.toThrow(
+      "source changed",
+    );
+    expect(f.posts()).toBe(0);
+  });
+  it("keeps AI tag freshness valid through both document and external completion", async () => {
+    for (const external of [false, true]) {
+      const f = external ? taggedFixture() : fixture();
+      const rootId = external ? "external" : "one";
+      const root = f.nodes.get(rootId) as ArticleRem;
+      root.tags = [...(root.tags ?? []), { tagRemId: "ai-tag", name: "AI Generated" }];
+      const result = await runArticles({ ...f.options, aiGeneratedTagRemId: "ai-tag" });
+      expect(result).toMatchObject({ published: 1, archived: 1 });
+      expect(f.state.receipts[0]?.source.aiGeneratedTagRemId).toBe("ai-tag");
+      expect(root.tags.some((tag) => tag.tagRemId === "ai-tag")).toBe(true);
+    }
+  });
   it("treats double percent as a disabled subtree", async () => {
     const f = fixture();
     (f.nodes.get("one") as RemNode).title = "%%hold";

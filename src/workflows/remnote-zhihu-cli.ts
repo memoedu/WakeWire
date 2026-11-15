@@ -35,6 +35,10 @@ const Config = z.object({
     .string()
     .regex(/^[A-Za-z0-9_-]+$/u)
     .optional(),
+  aiGeneratedTagRemId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/u)
+    .optional(),
 });
 type Config = z.infer<typeof Config>;
 
@@ -152,7 +156,13 @@ export class ZhihuPublisher implements ArticlePublisher {
     nodes: ArticleNode[],
     firstPublishedAt?: string,
   ): Promise<{ title: string; html: string; text: string; format: string }> {
-    return this.call("prepare", { nodes, ...(firstPublishedAt ? { firstPublishedAt } : {}) });
+    return this.call("prepare", {
+      nodes,
+      ...(firstPublishedAt ? { firstPublishedAt } : {}),
+      ...(this.config.aiGeneratedTagRemId
+        ? { aiGeneratedTagRemId: this.config.aiGeneratedTagRemId }
+        : {}),
+    });
   }
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }> {
     return this.call("check");
@@ -312,6 +322,7 @@ async function main(): Promise<void> {
         accountId: config.accountId,
         columnId: config.columnId,
         ...(config.publishedTagRemId ? { publishedTagRemId: config.publishedTagRemId } : {}),
+        ...(config.aiGeneratedTagRemId ? { aiGeneratedTagRemId: config.aiGeneratedTagRemId } : {}),
         state,
         save: () => atomicJson(stateFile, state),
       };
@@ -373,7 +384,12 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(result));
       return;
     }
-    const scan = await scanArticles(remnote, config.documentRemId, config.publishedTagRemId);
+    const scan = await scanArticles(
+      remnote,
+      config.documentRemId,
+      config.publishedTagRemId,
+      config.aiGeneratedTagRemId,
+    );
     const result: Record<string, unknown> = {
       ready: true,
       scanned: scan.nodeCount,

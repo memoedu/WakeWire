@@ -26,6 +26,8 @@ RemNote 的 `$...$` 行内公式及 `$$...$$` 公式转换为知乎原生 equati
 
 显式 `draft ... --new-version` 会保留已知旧云端草稿，另存新稿，并将旧记录移入本机 `previousDrafts`；普通重试仍复用同一 ID。未知的创建结果始终禁止重建，正在创建的已知 ID 即使带此参数也先恢复原记录，不再创建副本。
 
+配置 `aiGeneratedTagRemId` 后，按精确 tag ID 将对应节点及全部后代标为 AI 内容：只在最外层标记母节点前放一个紫色原生公式短标识 `AI`，范围内正文使用原生斜体。子层级不重复添加标识，嵌套同类标签也不重复；人写的相邻节点保持原样。整篇母节点本身带 tag 时，在正文开头放一次标识，标题保留知乎原生纯文本形式。正文和链接仍是原生文字，公式原有 LaTeX 保留，尾注不纳入斜体范围。标记范围参与源内容新鲜度校验；发布前改变 AI tag 会停止发布。自定义 HTML 文字颜色会被知乎清洗，因此仅短标识使用 LaTeX 色号，不将整段正文转换为公式。
+
 ## 客户端与凭据
 
 已核验官方 `zhihu-cli` 0.6.1 的 `capabilities`，该版本没有文章发布命令。官方发布 Skill 是另一条 OpenAPI 路线，需要独立发布凭据，不能把官方 CLI 的 Access Secret 擅自视为发布授权。
@@ -53,7 +55,8 @@ python -m venv <runtime-directory>
   "accountId": "<verified-zhihu-account-id>",
   "columnId": "<verified-managed-column-token>",
   "seriesStartDate": "<YYYY-MM-DD-in-Shanghai>",
-  "publishedTagRemId": "<exact-published-child-rem-id>"
+  "publishedTagRemId": "<exact-published-child-rem-id>",
+  "aiGeneratedTagRemId": "<exact-ai-generated-tag-rem-id>"
 }
 ```
 
