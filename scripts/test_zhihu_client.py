@@ -16,7 +16,7 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
-    def test_ai_ranges_have_one_parent_badge_and_inherited_italics(self):
+    def test_ai_ranges_have_one_parent_badge_without_automatic_italics(self):
         ai = [{"tagRemId": "ai-native", "name": "AI Generated"}]
         result = adapter.prepare([
             {"text": "Independent AI example", "depth": 0},
@@ -28,8 +28,9 @@ class AdapterTests(unittest.TestCase):
         ], "待发布", "ai-native")
         html = result["html"]
         self.assertEqual(html.count('alt="\\color{#7040a0}{\\text{AI}}"'), 1)
-        self.assertIn('<em><strong>Generated parent</strong></em>', html)
-        self.assertIn('<em>Child <a href="https://example.com/">reference</a></em>', html)
+        self.assertIn('<strong>Generated parent</strong>', html)
+        self.assertIn('Child <a href="https://example.com/">reference</a>', html)
+        self.assertNotIn('<em>', html)
         self.assertIn('<li>Human closing</li>', html)
         self.assertIn('<p>首次发布时间：待发布</p>', html)
         self.assertEqual(sum(s[0] == "math" for s in json.loads(result["format"])["styles"]), 2)
@@ -40,8 +41,29 @@ class AdapterTests(unittest.TestCase):
                  {"text": "Nested generated detail", "depth": 2, "tags": [{"tagRemId": "ai-root", "name": "renamed tag"}]}]
         result = adapter.prepare(nodes, None, "ai-root")
         self.assertEqual(result["html"].count('alt="\\color{#7040a0}{\\text{AI}}"'), 1)
-        self.assertIn('<em>Nested generated detail</em>', result["html"])
+        self.assertIn('<li>Nested generated detail</li>', result["html"])
         self.assertNotIn('eeimg=', adapter.prepare(nodes, None, "different-id")["html"])
+
+    def test_native_bold_trailing_space_never_becomes_literal_markdown(self):
+        nodes = [{"text": "Native emphasis", "depth": 0},
+                 {"text": "**Native bold ** and literal stars", "depth": 1,
+                  "richText": [{"text": "Native bold ", "bold": True}, {"text": "and literal **stars**\nnext line"}]}]
+        html = adapter.prepare(nodes)["html"]
+        self.assertIn('<strong>Native bold </strong>', html)
+        self.assertIn('literal **stars**<br/>next line', html)
+
+    def test_section_headings_preserve_six_source_levels_and_global_blank_blocks(self):
+        nodes = [{"text": "Deep independent article", "depth": 0},
+                 {"text": "Outer section", "depth": 1}]
+        nodes += [{"text": f"Child level {depth}", "depth": depth} for depth in range(2, 7)]
+        nodes += [{"text": "", "depth": 4}, {"text": "Second branch", "depth": 4},
+                  {"text": "Grandchild", "depth": 5}, {"text": "Deepest sibling", "depth": 6}]
+        prepared = adapter.prepare(nodes)
+        self.assertEqual(prepared["hierarchyMode"], "section-headings")
+        self.assertIn('<h2>Outer section</h2>', prepared["html"])
+        blocks = json.loads(prepared["format"])["blocks"]
+        self.assertEqual([b["depth"] for b in blocks if b["kind"] == "item"], [1, 2, 3, 4, 5, 3, 4, 5])
+        self.assertEqual([b for b in blocks if b["kind"] == "gap"], [{"kind": "gap", "depth": 0}])
 
     def test_native_math_keeps_latex_links_and_linebreaks(self):
         latex = r'\frac{x_1}{2} + \text{A & B}'
@@ -156,8 +178,23 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result["columnIds"], [])
         self.assertEqual(json.loads(result["format"])["blocks"], [{"kind": "paragraph", "depth": 0, "text": "One&two"}])
         client._get.return_value["state"] = "draft"
-        with self.assertRaisesRegex(ValueError, "not_published"):
+        with patch.object(adapter.time, "sleep"), self.assertRaisesRegex(ValueError, "not_published"):
             adapter.read_article(client, "123")
+
+    def test_platform_link_wrapper_preserves_exact_target_and_cannot_hide_changed_links(self):
+        direct = '<p><a href="https://example.com/page?q=1&amp;x=2">Reference</a></p>'
+        wrapped = '<p><a href="https://link.zhihu.com/?target=https%3A%2F%2Fexample.com%2Fpage%3Fq%3D1%26x%3D2">Reference</a></p>'
+        self.assertEqual(adapter.format_structure(direct), adapter.format_structure(wrapped))
+        self.assertNotEqual(adapter.format_structure(direct), adapter.format_structure(wrapped.replace('example.com', 'different.example')))
+
+    def test_public_visibility_retry_is_read_only(self):
+        client = MagicMock()
+        client._get.side_effect = [{"state": "draft"}, {"id": "123", "state": "published", "content": "<p>Independent public body</p>"}]
+        with patch.object(adapter.time, "sleep") as sleep:
+            self.assertEqual(adapter.read_article(client, "123")["id"], "123")
+        sleep.assert_called_once_with(2)
+        self.assertEqual(client._get.call_count, 2)
+        client._session.post.assert_not_called()
 
     def test_title_and_body_limits_never_truncate_or_generate_content(self):
         for nodes in (
@@ -344,7 +381,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_nested_separator_keeps_the_children_at_the_original_depth(self):
         result = self.prepare([(1, "Parent item"), (2, "First detail"), (2, ""), (2, "Second detail"), (1, "Sibling item")])
-        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)], [("item", 1), ("item", 2), ("gap", 1), ("item", 2), ("item", 1)])
+        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)], [("item", 1), ("item", 2), ("gap", 0), ("item", 2), ("item", 1)])
 
     def test_node_internal_single_and_double_newlines_are_visible_breaks(self):
         result = self.prepare([(1, "First line\nSecond line\n\nThird line")])

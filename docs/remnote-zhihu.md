@@ -22,11 +22,13 @@
 
 RemNote 的 `$...$` 行内公式及 `$$...$$` 公式转换为知乎原生 equation 图片，LaTeX 原文经 URL 编码放入知乎公式地址，并保留于 `alt`；转义美元符号、行内代码及代码块保持文字。回读把公式模式、LaTeX 与出现位置纳入布局对照，不能因图片没有文本节点而漏检公式；超链接保留原目标地址。
 
-文章读取启用本地 MCP 的 `renderNativeMarkdown`，保留原生公式定界符和文字标记；普通纯文本读取可能只给出 LaTeX 内容，不能用于文章转换。草稿核验优先读取实际持久化的 `/draft`，不把另一接口返回的未清洗内容当作编辑器最终输入。知乎会清空公式图片的 `src`，但保留 `eeimg` 与 `alt` 并在编辑器中构建 MathJax 公式；对照必须比较这些原生公式数据。编辑器最多显示五层列表，含更深正文的来源允许存草稿供审核，正式发布前停止，禁止静默压平后发布。
+文章元数据读取启用本地 MCP 的 `renderNativeMarkdown`，正文另按节点读取 `personalwebsite_richtext` 原生片段，直接转换粗体、原稿斜体、代码、超链接和公式，不经 Markdown 重解析。这样粗体末尾带空格也不会输出为字面双星号。原生格式片段参与源新鲜度校验；不支持的内容停止处理。草稿核验优先读取实际持久化的 `/draft`，不把另一接口返回的未清洗内容当作最终输入。知乎会清空公式图片的 `src`，但保留 `eeimg` 与 `alt` 并在编辑器中构建 MathJax 公式；对照比较这些原生公式数据。
+
+编辑器最多显示五层列表。源正文有六层时，将文章一级节点输出为段落标题，其后五层输出为列表，保留完整父子关系，不把第六层并到第五层。更多层级允许先存草稿，正式发布前停止。空段落输出到列表容器外侧，再恢复后续列表深度，避免编辑器调整空段落时改变其后内容缩进。
 
 显式 `draft ... --new-version` 会保留已知旧云端草稿，另存新稿，并将旧记录移入本机 `previousDrafts`；普通重试仍复用同一 ID。未知的创建结果始终禁止重建，正在创建的已知 ID 即使带此参数也先恢复原记录，不再创建副本。
 
-配置 `aiGeneratedTagRemId` 后，按精确 tag ID 将对应节点及全部后代标为 AI 内容：只在最外层标记母节点前放一个紫色原生公式短标识 `AI`，范围内正文使用原生斜体。子层级不重复添加标识，嵌套同类标签也不重复；人写的相邻节点保持原样。整篇母节点本身带 tag 时，在正文开头放一次标识，标题保留知乎原生纯文本形式。正文和链接仍是原生文字，公式原有 LaTeX 保留，尾注不纳入斜体范围。标记范围参与源内容新鲜度校验；发布前改变 AI tag 会停止发布。自定义 HTML 文字颜色会被知乎清洗，因此仅短标识使用 LaTeX 色号，不将整段正文转换为公式。
+配置 `aiGeneratedTagRemId` 后，按精确 tag ID 将对应节点及全部后代视为 AI 内容：只在最外层标记母节点前放一个紫色原生公式短标识 `AI`，不自动添加斜体。子层级不重复添加标识，嵌套同类标签也不重复；原稿已有的文字格式保持原样。整篇母节点本身带 tag 时，在正文开头放一次标识，标题保留知乎原生纯文本形式。正文和链接仍是原生文字，公式原有 LaTeX 保留。标记范围参与源内容新鲜度校验；发布前改变 AI tag 会停止发布。自定义 HTML 文字颜色会被知乎清洗，因此仅短标识使用 LaTeX 色号，不将整段正文转换为公式。
 
 ## 客户端与凭据
 
@@ -67,6 +69,7 @@ node dist/workflows/remnote-zhihu-cli.js preview <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js draft <absolute-config.json> <source-rem-id>
 node dist/workflows/remnote-zhihu-cli.js draft <absolute-config.json> <source-rem-id> --new-version
 node dist/workflows/remnote-zhihu-cli.js approve-draft <absolute-config.json> <source-rem-id>
+node dist/workflows/remnote-zhihu-cli.js publish-now <absolute-config.json> <source-rem-id>
 node dist/workflows/remnote-zhihu-cli.js run <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js adopt <absolute-config.json> <source-rem-id> <published-article-id>
 pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <absolute-config.json>
@@ -83,6 +86,10 @@ pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <ab
 任务以当前登录用户的 Limited 权限隐藏运行，禁止重叠实例，保留实际 Node 子流程的退出码。失败最多间隔 5 分钟重试两次；CLI 的窗口限制和已落盘回执仍约束每次重试，不会再次提交未知结果。注册任务不会立即执行发布。需 Windows 用户已登录、RemNote MCP 在线及现有 Chrome 登录态同步可用；不依赖 ChatGPT 桌面端中的 Codex 保持开启。暂停时停用该 Windows 计划任务，保留本机回执。恢复连接沿用已有 RemNote MCP 启动入口，不重启 RemNote 或用户正在使用的应用。不得通过删除未知结果记录、临时另发、扩大到其他 Document 或补发错过时段绕过限制。
 
 ## 验证
+
+用户明确要求立即发布已经审核的草稿时，可使用 `publish-now` 指定唯一来源。它要求该来源已有状态为 `ready` 的已知云端草稿，复用原锁、提交围栏、账号和内容核验及归档，不选择其他稿件。此操作不受日常窗口限制，记录独立手动时段；普通 `run` 仍受原窗口约束。
+
+发布后允许有限次只读等待公开可见状态，不重放发布。知乎为站外链接添加的 `link.zhihu.com/?target=...` 仅在精确主机、路径和单个安全 HTTP(S) 目标满足条件时还原为目标地址核验；不访问跳转，也不把不同目标判为相同。
 
 ```powershell
 npm run typecheck

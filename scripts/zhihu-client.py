@@ -96,7 +96,12 @@ def article_id_from_result(result):
 def read_article(client, article_id):
     if not re.fullmatch(r"\d+", article_id):
         raise ValueError("invalid_article_id")
-    article = client._get(f"https://zhuanlan.zhihu.com/api/articles/{article_id}")
+    for attempt in range(4):
+        article = client._get(f"https://zhuanlan.zhihu.com/api/articles/{article_id}")
+        if article.get("state") == "published" and article.get("is_visible") is not False and not article.get("content_need_truncated"):
+            break
+        if attempt < 3:
+            time.sleep(2)
     if article.get("state") != "published" or article.get("is_visible") is False or article.get("content_need_truncated"):
         raise ValueError("article_not_published")
     html = article.get("content", "")

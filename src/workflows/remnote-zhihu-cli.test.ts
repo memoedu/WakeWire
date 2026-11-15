@@ -45,6 +45,13 @@ it("runs the external tag workflow through a real MCP HTTP transport without mov
         expect(args.renderNativeMarkdown).toBe(true);
         value = { ...nodes.get(String(args.remId)) };
         break;
+      case "personalwebsite_richtext":
+        expect(args.preserveReferences).toBe(true);
+        value = {
+          remId: args.remId,
+          content: [{ text: nodes.get(String(args.remId))?.title ?? "" }],
+        };
+        break;
       case "remnote_list_children":
         value = {
           children: [...nodes.values()].filter((node) => node.parentRemId === args.parentRemId),

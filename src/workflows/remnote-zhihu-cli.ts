@@ -55,6 +55,13 @@ const ArticleRemSchema = z.object({
 
 /** Article-only tag extension; the existing command adapter remains unchanged. */
 export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
+  async richText(remId: string): Promise<Array<Record<string, unknown>>> {
+    const result = z
+      .object({ remId: z.string(), content: z.array(z.record(z.string(), z.unknown())) })
+      .parse(await this.call("personalwebsite_richtext", { remId, preserveReferences: true }));
+    if (result.remId !== remId) throw new Error("native rich text identity changed");
+    return result.content;
+  }
   override async read(remId: string): Promise<ArticleRem> {
     return ArticleRemSchema.parse(
       await this.call("remnote_read_note", {
@@ -155,7 +162,13 @@ export class ZhihuPublisher implements ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
     firstPublishedAt?: string,
-  ): Promise<{ title: string; html: string; text: string; format: string }> {
+  ): Promise<{
+    title: string;
+    html: string;
+    text: string;
+    format: string;
+    hierarchyMode?: string;
+  }> {
     return this.call("prepare", {
       nodes,
       ...(firstPublishedAt ? { firstPublishedAt } : {}),
@@ -292,12 +305,14 @@ async function main(): Promise<void> {
   const [action, configFile, sourceRemId, articleId] = process.argv.slice(2);
   if (
     !action ||
-    !["check", "scan", "preview", "run", "adopt", "draft", "approve-draft"].includes(action) ||
+    !["check", "scan", "preview", "run", "publish-now", "adopt", "draft", "approve-draft"].includes(
+      action,
+    ) ||
     !configFile ||
     !path.isAbsolute(configFile)
   )
     throw new Error(
-      "usage: remnote-zhihu-cli.js check|scan|preview|run|adopt|draft|approve-draft <absolute-config.json> [sourceRemId articleId]",
+      "usage: remnote-zhihu-cli.js check|scan|preview|run|publish-now|adopt|draft|approve-draft <absolute-config.json> [sourceRemId articleId]",
     );
   const config = Config.parse(JSON.parse(fs.readFileSync(configFile, "utf8")));
   for (const target of [config.python, config.cookieSnapshot])
@@ -305,14 +320,16 @@ async function main(): Promise<void> {
   if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(config.mcpUrl).hostname))
     throw new Error("RemNote endpoint must be loopback");
   const home = path.dirname(configFile);
-  const release = ["run", "adopt", "draft", "approve-draft"].includes(action)
+  if (action === "publish-now" && !sourceRemId)
+    throw new Error("publish-now requires an exact approved source");
+  const release = ["run", "publish-now", "adopt", "draft", "approve-draft"].includes(action)
     ? lock(path.join(home, "run.lock"))
     : () => {};
   const remnote = new ArticleRemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);
     const publisher = new ZhihuPublisher(config);
-    if (["run", "adopt", "draft", "approve-draft"].includes(action)) {
+    if (["run", "publish-now", "adopt", "draft", "approve-draft"].includes(action)) {
       const stateFile = path.join(home, "state.json");
       const state = readState(stateFile);
       const shared = {
@@ -377,6 +394,7 @@ async function main(): Promise<void> {
         ...shared,
         now: new Date(),
         currentTime: () => new Date(),
+        ...(action === "publish-now" ? { manualSourceRemId: sourceRemId as string } : {}),
         ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
       });
       const finishedAt = new Date().toISOString();
@@ -429,7 +447,7 @@ async function main(): Promise<void> {
     }
     console.log(JSON.stringify(result));
   } catch (error) {
-    if (action === "run") {
+    if (action === "run" || action === "publish-now") {
       const finishedAt = new Date().toISOString();
       const message = error instanceof Error ? error.message : "";
       const reason = /^remnote_|^RemNote bridge/u.test(message)
