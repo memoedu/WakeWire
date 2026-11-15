@@ -2,7 +2,7 @@
 
 import json
 import re
-from html import escape
+from html import escape, unescape
 from html.parser import HTMLParser
 from urllib.parse import quote, parse_qs, urlparse
 
@@ -207,13 +207,145 @@ def native_html(runs, refs):
     return "".join(result)
 
 
-class LiftGaps(HTMLParser):
-    """Native Draft.js gaps are unstyled blocks, outside every list container."""
+def card_url(href):
+    parsed = urlparse(canonical_link(href))
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("article_link_card_target_invalid")
+    return canonical_link(href)
+
+
+def card_html(href, title):
+    return ('<a href="' + escape(card_url(href), quote=True)
+            + '" data-draft-node="block" data-draft-type="link-card" data-text="'
+            + escape(title, quote=True) + '" data-draft-title="' + escape(title, quote=True)
+            + '" data-draft-cover="">' + escape(title) + '</a>')
+
+
+class StandaloneLink(HTMLParser):
+    """Only a leaf with one whole link and an optional short colon label qualifies."""
     def __init__(self):
-        super().__init__(convert_charrefs=False)
-        self.parts, self.lists, self.in_gap = [], [], False
+        super().__init__()
+        self.stack, self.before, self.title, self.after = [], [], [], []
+        self.href = None
+        self.inside = False
+        self.valid = True
 
     def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag not in ("a", "strong", "b", "em", "i", "span", "u", "s", "del"):
+            self.valid = False
+        if tag == "a":
+            if self.href is not None or self.stack or "member_mention" in attributes.get("class", "").split():
+                self.valid = False
+            self.href, self.inside = attributes.get("href", ""), True
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if not self.stack or self.stack.pop() != tag:
+            self.valid = False
+        if tag == "a":
+            self.inside = False
+
+    def handle_data(self, data):
+        (self.title if self.inside else self.before if self.href is None else self.after).append(data)
+
+
+def standalone_card(body):
+    parser = StandaloneLink()
+    parser.feed(body)
+    if not parser.valid or parser.stack:
+        return None
+    label = "".join(parser.before).strip()
+    if parser.href is None:
+        # Plain URLs are not autolinked by CommonMark. Do not reinterpret code or rich blocks.
+        match = re.fullmatch(r"(?:(?P<label>[^:：\r\n.!?。！？<>]{1,20}[:：])\s*)?(?P<url>https?://[^\s<>]+)", unescape(body).strip())
+        if not match:
+            return None
+        href, title, label = match["url"], match["url"], match["label"] or ""
+        prefix = escape(label)
+    else:
+        if "".join(parser.after).strip() or (label and not re.fullmatch(r"[^:：\r\n.!?。！？<>]{1,20}[:：]", label)):
+            return None
+        href, title = parser.href, "".join(parser.title).strip()
+        prefix = body[:body.index("<a")].strip()
+    if not title:
+        return None
+    try:
+        href = card_url(href)
+    except ValueError:
+        return None
+    return ("<p>" + prefix + "</p>" if label else "") + card_html(href, title)
+
+
+class CanonicalCards(HTMLParser):
+    """Ignore hydrated card metadata, but retain the source title, target and native type."""
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.parts, self.card = [], None
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if self.card is not None:
+            self.card["rich"] = True
+            if tag == "a":
+                self.card["depth"] += 1
+            return
+        if attributes.get("data-draft-type") == "link-card" or "LinkCard" in attributes.get("class", "").split():
+            if tag != "a" or (attributes.get("data-draft-node") != "block" and "LinkCard" not in attributes.get("class", "").split()):
+                raise ValueError("article_link_card_block_invalid")
+            self.card = {"attrs": attributes, "text": [], "depth": 1, "rich": False}
+            return
+        self.parts.append(self.get_starttag_text())
+
+    def handle_endtag(self, tag):
+        if self.card is not None:
+            if tag == "a":
+                self.card["depth"] -= 1
+                if self.card["depth"] == 0:
+                    attributes = self.card["attrs"]
+                    title = attributes.get("data-text") or ("".join(self.card["text"]) if not self.card["rich"] else attributes.get("data-draft-title"))
+                    if not title or not title.strip():
+                        raise ValueError("article_link_card_title_missing")
+                    self.parts.append(card_html(attributes.get("href", ""), title.strip()))
+                    self.card = None
+            return
+        self.parts.append("</" + tag + ">")
+
+    def handle_startendtag(self, tag, attrs):
+        if self.card is not None:
+            self.card["rich"] = True
+        else:
+            self.parts.append(self.get_starttag_text())
+
+    def handle_data(self, data):
+        (self.card["text"] if self.card is not None else self.parts).append(data)
+
+    def handle_entityref(self, name):
+        self.handle_data(unescape("&" + name + ";") if self.card is not None else "&" + name + ";")
+
+    def handle_charref(self, name):
+        self.handle_data(unescape("&#" + name + ";") if self.card is not None else "&#" + name + ";")
+
+
+def canonical_cards(html):
+    parser = CanonicalCards()
+    parser.feed(html)
+    if parser.card is not None:
+        raise ValueError("article_link_card_incomplete")
+    return "".join(parser.parts)
+
+
+class LiftGaps(HTMLParser):
+    """Native gaps and standalone cards must be outside every list container."""
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.parts, self.lists, self.in_gap, self.in_card = [], [], False, False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "div" and dict(attrs).get("data-outline-card") == "1":
+            self.parts.extend("</" + item + ">" for item in reversed(self.lists))
+            self.in_card = True
+            return
         if tag == "p" and "ztext-empty-paragraph" in dict(attrs).get("class", ""):
             self.parts.extend("</" + item + ">" for item in reversed(self.lists))
             self.in_gap = True
@@ -222,6 +354,10 @@ class LiftGaps(HTMLParser):
             self.lists.append(tag)
 
     def handle_endtag(self, tag):
+        if tag == "div" and self.in_card:
+            self.parts.extend("<" + item + ">" for item in self.lists)
+            self.in_card = False
+            return
         self.parts.append("</" + tag + ">")
         if tag in ("ul", "ol"):
             self.lists.pop()
@@ -244,7 +380,7 @@ class LiftGaps(HTMLParser):
 
 def normalize(html):
     parser = VisibleText()
-    parser.feed(html)
+    parser.feed(canonical_cards(html))
     return compact("".join(parser.parts))
 
 
@@ -262,6 +398,7 @@ class ArticleLayout(HTMLParser):
         self.links = []
         self.visible_offset = 0
         self.pre_depth = 0
+        self.card = None
 
     def handle_starttag(self, tag, attrs):
         tag = {"b": "strong", "i": "em"}.get(tag, tag)
@@ -292,6 +429,14 @@ class ArticleLayout(HTMLParser):
         if tag == "a":
             attributes = dict(attrs)
             href = canonical_link(attributes.get("href", ""))
+            if attributes.get("data-draft-type") == "link-card":
+                if self.lists or any(p["parts"] for p in self.paragraphs):
+                    raise ValueError("article_link_card_block_invalid")
+                self.card = {"kind": "card", "depth": 0, "href": card_url(href), "text": ""}
+                self.events.append(self.card)
+                self.styles.append(["card", href, self.visible_offset])
+                for paragraph in self.paragraphs:
+                    paragraph["card"] = True
             if "member_mention" in attributes.get("class", "").split():
                 member_id = attributes.get("data-hash", "")
                 parsed = urlparse(href)
@@ -311,7 +456,9 @@ class ArticleLayout(HTMLParser):
         elif tag in ("p", "h1", "h2", "h3", "h4", "h5", "h6") and self.paragraphs:
             paragraph = self.paragraphs.pop()
             value = "".join(paragraph["parts"])
-            if not value.strip("\n"):
+            if paragraph.get("card") and not value:
+                pass
+            elif not value.strip("\n"):
                 self.events.append({"kind": "gap", "depth": paragraph["depth"]})
             elif paragraph["target"] is not None:
                 target = paragraph["target"]
@@ -326,6 +473,7 @@ class ArticleLayout(HTMLParser):
             self.pre_depth -= 1
         if tag == "a":
             self.styles.append(["-a", self.visible_offset])
+            self.card = None
 
     def handle_data(self, data):
         # Formatting whitespace in HTML is not a visible newline; <br> is.
@@ -333,7 +481,9 @@ class ArticleLayout(HTMLParser):
         self.visible_offset += len(compact(data))
         if not value:
             return
-        if self.paragraphs:
+        if self.card is not None:
+            self.card["text"] += value
+        elif self.paragraphs:
             self.paragraphs[-1]["parts"].append(value)
         elif self.items:
             self.items[-1]["text"] += value
@@ -345,7 +495,7 @@ class ArticleLayout(HTMLParser):
 
 def format_structure(html):
     parser = ArticleLayout()
-    parser.feed(html)
+    parser.feed(canonical_cards(html))
     return json.dumps({"version": 2, "blocks": parser.events, "styles": parser.styles}, ensure_ascii=False)
 
 
@@ -424,6 +574,11 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
             # Emit that representation so a hierarchy return is not a blank Rem.
             badge = ai_badge() if node["ai_start"] else ""
             body = native_html(node["native"], node["refs"]) if node["native"] is not None else inline_or_blocks(node["text"])
+            card = standalone_card(body) if not node["children"] and "\n" not in node["text"] and "\r" not in node["text"] else None
+            if card:
+                flush()
+                result.append('<div data-outline-card="1">' + ("<p>" + badge + "</p>" if badge else "") + card + '</div>')
+                continue
             if headings:
                 flush()
                 result.append("<h2>" + badge + body + "</h2>" + render_level(node["children"]))
@@ -437,6 +592,8 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
     gaps = LiftGaps()
     gaps.feed(html)
     html = "".join(gaps.parts)
+    while re.search(r"<(ul|ol)>\s*</\1>", html):
+        html = re.sub(r"<(ul|ol)>\s*</\1>", "", html)
     text = normalize(html)
     if not 9 <= len(text) <= 100000:
         raise ValueError("article_body_length")

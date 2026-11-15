@@ -16,6 +16,96 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_standalone_reference_leaves_become_cards_but_prose_links_stay_inline(self):
+        result = adapter.prepare([
+            {"text": "Reference example", "depth": 0},
+            {"text": "Read [the guide](https://example.com/guide) before continuing.", "depth": 1},
+            {"text": "References", "depth": 1},
+            {"text": "原文：[Original guide](https://example.org/original?q=1&lang=en)", "depth": 2},
+            {"text": "译文：[Translated guide](https://example.net/translation)", "depth": 2},
+            {"text": "Ordinary sibling after the citations", "depth": 2},
+            {"text": "Final independent paragraph", "depth": 1},
+        ], "待发布")
+        html = result["html"]
+        self.assertEqual(html.count('data-draft-type="link-card"'), 2)
+        self.assertIn('<li>Read <a href="https://example.com/guide">the guide</a> before continuing.</li>', html)
+        self.assertIn('<p>原文：</p><a ', html)
+        blocks = json.loads(result["format"])["blocks"]
+        cards = [b for b in blocks if b["kind"] == "card"]
+        self.assertEqual([b["depth"] for b in cards], [0, 0])
+        self.assertEqual(cards[0]["href"], "https://example.org/original?q=1&lang=en")
+        self.assertEqual(next(b["depth"] for b in blocks if b.get("text") == "Ordinarysiblingafterthecitations"), 2)
+        self.assertEqual(blocks[-2]["kind"], "gap")
+        self.assertEqual(blocks[-1]["text"], "首次发布时间：待发布")
+        self.assertNotIn('data-outline-card', html)
+
+    def test_native_rich_reference_preserves_label_bold_and_ordinary_native_link(self):
+        link = {"type": "link", "url": "https://example.org/reference", "children": [{"text": "Reference title", "bold": True}]}
+        result = adapter.prepare([
+            {"text": "Native links", "depth": 0},
+            {"text": "原文：Reference title", "depth": 1, "richText": [{"text": "原文：", "bold": True}, link]},
+            {"text": "Compare Reference title with the original argument.", "depth": 1,
+             "richText": [{"text": "Compare "}, link, {"text": " with the original argument."}]},
+        ])
+        self.assertEqual(result["html"].count('data-draft-type="link-card"'), 1)
+        self.assertIn('<p><strong>原文：</strong></p>', result["html"])
+        self.assertIn('Compare <a href="https://example.org/reference"><strong>Reference title</strong></a> with the original argument.', result["html"])
+
+    def test_bare_url_and_single_link_are_independent_references(self):
+        for text in ("https://example.org/path?q=1&x=2", "资料：https://example.org/path", "[Standalone reference](https://example.org/path)"):
+            with self.subTest(text=text):
+                result = adapter.prepare([{"text": "Bare references", "depth": 0}, {"text": text, "depth": 1}])
+                self.assertEqual(result["html"].count('data-draft-type="link-card"'), 1)
+
+    def test_multiline_multiple_links_parent_nodes_and_code_are_not_cards(self):
+        samples = [
+            [{"text": "[Reference one](https://example.org/one)\nmore explanation", "depth": 1}],
+            [{"text": "[First reference](https://example.org/one) and [second](https://example.org/two)", "depth": 1}],
+            [{"text": "[Parent reference](https://example.org/one)", "depth": 1}, {"text": "Child explanation remains subordinate", "depth": 2}],
+            [{"text": "`https://example.org/code` is literal code", "depth": 1}],
+            [{"text": "A sentence: consider [the reference](https://example.org/one) carefully", "depth": 1}],
+        ]
+        for nodes in samples:
+            with self.subTest(nodes=nodes):
+                self.assertNotIn('data-draft-type="link-card"', adapter.prepare([{"text": "Ordinary hyperlinks", "depth": 0}, *nodes])["html"])
+
+    def test_card_leaf_with_ai_badge_keeps_one_badge_and_five_level_siblings(self):
+        nodes = [{"text": "Deep card fixture", "depth": 0}, {"text": "Section heading", "depth": 1}]
+        nodes += [{"text": "Nested level " + str(depth), "depth": depth} for depth in range(2, 7)]
+        nodes += [{"text": "[Generated reference](https://example.org/ref)", "depth": 6, "tags": [{"tagRemId": "ai"}]},
+                  {"text": "Another deepest sibling", "depth": 6}]
+        result = adapter.prepare(nodes, "待发布", "ai")
+        self.assertEqual(result["html"].count('alt="\\color{#7040a0}{\\text{AI}}"'), 1)
+        blocks = json.loads(result["format"])["blocks"]
+        self.assertEqual(next(b["depth"] for b in blocks if b["kind"] == "card"), 0)
+        self.assertEqual(next(b["depth"] for b in blocks if b.get("text") == "Anotherdeepestsibling"), 5)
+
+    def test_card_readback_ignores_platform_metadata_but_detects_type_title_target_and_depth_changes(self):
+        expected = '<a href="https://example.org/ref" data-draft-node="block" data-draft-type="link-card" data-text="Original reference" data-draft-title="Original reference">Original reference</a>'
+        hydrated = '<a class="LinkCard new" href="https://link.zhihu.com/?target=https%3A%2F%2Fexample.org%2Fref" data-text="Original reference" data-draft-title="Platform title"><span class="LinkCard-image"><img src="https://pic.example.org/cover.png"/></span><span>Platform title</span><span>100 votes <a class="tag">Article</a></span></a>'
+        self.assertEqual(adapter.normalize(expected), "Originalreference")
+        self.assertEqual(adapter.normalize(hydrated), adapter.normalize(expected))
+        self.assertEqual(adapter.format_structure(expected), adapter.format_structure(hydrated))
+        for edited in (expected.replace('link-card', 'ordinary-link'), expected.replace('example.org/ref', 'example.org/changed'), expected.replace('Original reference', 'Different reference')):
+            self.assertNotEqual(adapter.format_structure(expected), adapter.format_structure(edited))
+        with self.assertRaisesRegex(ValueError, 'link_card_block_invalid'):
+            adapter.format_structure('<ul><li>' + expected + '</li></ul>')
+        with self.assertRaisesRegex(ValueError, 'link_card_target_invalid'):
+            adapter.format_structure(expected.replace('https://example.org/ref', 'javascript:alert(1)'))
+        with self.assertRaisesRegex(ValueError, 'link_card_incomplete'):
+            adapter.format_structure(expected.removesuffix('</a>'))
+
+    def test_draft_roundtrip_blocks_sanitized_card_downgrade_without_publishing(self):
+        client = MagicMock()
+        expected = {"id": "711", "authorId": "author", "title": "Fixture", "text": "Oldbody", "format": "old", "state": "draft"}
+        html = adapter.prepare([{"text": "Reference fixture", "depth": 0}, {"text": "[Standalone reference](https://example.org/ref)", "depth": 1}])["html"]
+        saved = {**expected, "text": adapter.normalize(html), "format": adapter.format_structure(html.replace('link-card', 'ordinary-link'))}
+        client._session.patch.return_value.status_code = 200
+        with patch.object(adapter, 'read_draft', side_effect=[expected, saved]):
+            with self.assertRaisesRegex(ValueError, 'link_card_readback_mismatch'):
+                adapter.write_draft(client, '711', 'Fixture', html, 'author', expected)
+        client._content_publish.assert_not_called()
+
     def test_mentions_split_across_style_runs_cannot_silently_remain_plain(self):
         html = '<p>来自@<strong>Example</strong> 的观点</p>'
         self.assertEqual(adapter.mention_names(html), ["Example"])
