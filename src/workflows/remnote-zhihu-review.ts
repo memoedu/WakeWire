@@ -13,6 +13,7 @@ import {
 export function reviewIssue(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   for (const [pattern, label] of [
+    [/knowledge base/u, "当前 RemNote 连接的是另一个知识库，目标文章库未连接。"],
     [/mention|profile_changed/u, "标准艾特的账号无法明确核验，请确认被提及者。"],
     [
       /cloud draft changed|author edits|review draft/u,

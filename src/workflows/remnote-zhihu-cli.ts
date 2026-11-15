@@ -27,6 +27,7 @@ import { articleFeedback, auditArticles, reviewIssue } from "./remnote-zhihu-rev
 const Config = z.object({
   documentRemId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
   documentTitle: z.string().optional(),
+  knowledgeBaseId: z.string().min(1).optional(),
   mcpUrl: z.url(),
   python: z.string().min(1),
   cookieSnapshot: z.string().min(1),
@@ -64,6 +65,14 @@ const ArticleRemSchema = z.object({
 
 /** Article-only tag extension; the existing command adapter remains unchanged. */
 export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
+  override async connect(url: string, knowledgeBaseId?: string): Promise<void> {
+    await super.connect(url);
+    if (knowledgeBaseId) {
+      const status = (await this.call("remnote_status", {})) as { knowledgeBaseId?: string };
+      if (status.knowledgeBaseId !== knowledgeBaseId)
+        throw new Error("RemNote knowledge base changed; source library is not connected");
+    }
+  }
   async richText(remId: string): Promise<Array<Record<string, unknown>>> {
     const result = z
       .object({ remId: z.string(), content: z.array(z.record(z.string(), z.unknown())) })
@@ -375,13 +384,15 @@ async function main(): Promise<void> {
   const remnote = new ArticleRemNoteMcp();
   let activeState: ArticleState | undefined;
   try {
-    await remnote.connect(config.mcpUrl);
+    if (["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action))
+      activeState = readState(path.join(home, "state.json"));
+    await remnote.connect(config.mcpUrl, config.knowledgeBaseId);
     const publisher = new ZhihuPublisher(config);
     if (
       ["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action)
     ) {
       const stateFile = path.join(home, "state.json");
-      const state = readState(stateFile);
+      const state = activeState as ArticleState;
       activeState = state;
       const shared = {
         remnote,
