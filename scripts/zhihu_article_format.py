@@ -25,6 +25,92 @@ def canonical_link(href):
     return href
 
 
+MENTION = re.compile(r"(?<![A-Za-z0-9_.+\-/])@([^\s@,，。！？!?、:：;；（）()\[\]<>“”\"'…]+)")
+
+
+def mention_html(name, member_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", member_id):
+        raise ValueError("mention_identity_invalid")
+    return ('<a class="member_mention" href="https://www.zhihu.com/people/' + member_id
+            + '" data-hash="' + member_id + '" data-hovercard="p$b$' + member_id + '">@'
+            + escape(name) + '</a>')
+
+
+class MentionText(HTMLParser):
+    """Transform prose mentions only; never reinterpret links, code or math."""
+    VOID = {"br", "img", "hr", "input", "meta", "link"}
+    INLINE = {"strong", "b", "em", "i", "span", "u", "s", "del", "sub", "sup"}
+
+    def __init__(self, bindings=None):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.tags, self.names, self.prose = [], [], set(), []
+        self.bindings = bindings
+
+    def flush_prose(self):
+        for match in MENTION.finditer("".join(self.prose)):
+            name = match[1].rstrip('.')
+            if name:
+                self.names.add(name)
+        self.prose = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.INLINE:
+            self.flush_prose()
+        self.parts.append(self.get_starttag_text())
+        if tag not in self.VOID:
+            self.tags.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        self.flush_prose()
+        self.parts.append(self.get_starttag_text())
+
+    def handle_endtag(self, tag):
+        if tag not in self.INLINE:
+            self.flush_prose()
+        self.parts.append('</' + tag + '>')
+        if self.tags and self.tags[-1] == tag:
+            self.tags.pop()
+
+    def handle_data(self, data):
+        if any(tag in ("a", "code", "pre", "script", "style") for tag in self.tags):
+            self.parts.append(escape(data))
+            return
+        if self.bindings is None:
+            self.prose.append(data)
+            self.parts.append(escape(data))
+            return
+        start = 0
+        for match in MENTION.finditer(data):
+            name = match[1].rstrip('.')
+            if not name:
+                continue
+            end = match.start(1) + len(name)
+            self.names.add(name)
+            self.parts.append(escape(data[start:match.start()]))
+            member_id = self.bindings.get(name)
+            if not member_id:
+                raise ValueError("mention_unresolved")
+            self.parts.append(mention_html(name, member_id))
+            start = end
+        self.parts.append(escape(data[start:]))
+
+
+def mention_names(html):
+    parser = MentionText()
+    parser.feed(html)
+    parser.flush_prose()
+    return sorted(parser.names)
+
+
+def apply_mentions(html, bindings):
+    parser = MentionText({item["name"]: item["id"] for item in bindings})
+    parser.feed(html)
+    result = "".join(parser.parts)
+    if mention_names(result):
+        raise ValueError("mention_split_format_unsupported")
+    return result
+
+
 class VisibleText(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -204,7 +290,15 @@ class ArticleLayout(HTMLParser):
         if tag == "pre":
             self.pre_depth += 1
         if tag == "a":
-            href = canonical_link(dict(attrs).get("href", ""))
+            attributes = dict(attrs)
+            href = canonical_link(attributes.get("href", ""))
+            if "member_mention" in attributes.get("class", "").split():
+                member_id = attributes.get("data-hash", "")
+                parsed = urlparse(href)
+                if not re.fullmatch(r"[a-f0-9]{32}", member_id) or parsed.scheme not in ("", "http", "https") or parsed.hostname != "www.zhihu.com" or parsed.username or parsed.password or parsed.path.rstrip('/') != "/people/" + member_id:
+                    raise ValueError("mention_identity_invalid")
+                href = "https://www.zhihu.com/people/" + member_id
+                self.styles.append(["mention", member_id, self.visible_offset])
             self.links.append(href)
             self.styles.append(["+a", href, self.visible_offset])
 

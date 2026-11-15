@@ -32,6 +32,8 @@ RemNote 的 `$...$` 行内公式及 `$$...$$` 公式转换为知乎原生 equati
 
 ## 客户端与凭据
 
+正文中的 `@姓名` 使用知乎原生 `member_mention` 节点，写入真实账号 hash 与 hovercard，并将账号身份纳入格式核验。`mentionBindings` 可保存用户已经确认的姓名与账号 ID；每次转换仍通过当前登录态核对账号。未绑定姓名先进行有限分页的用户搜索，只采用完整结果中唯一的同名账号并再次核对档案；重名、缺失、未完成的分页或身份变化会停止，不能退回普通文字。邮箱、代码、公式和原有超链接不按普通提及文本重解释。审核后及最终提交前再次比对提及身份，防止目标变化。
+
 已核验官方 `zhihu-cli` 0.6.1 的 `capabilities`，该版本没有文章发布命令。官方发布 Skill 是另一条 OpenAPI 路线，需要独立发布凭据，不能把官方 CLI 的 Access Secret 擅自视为发布授权。
 
 本流程调用维护中的 [BAIGUANGMEI/zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 的 `ZhihuClient`（PyPI 包 `pyzhihu-cli==0.2.4`），复用其 CSRF、草稿及统一内容发布能力。纯文字文章也使用知乎当前网页编辑器的 `POST /api/v4/content/publish`，传入 `action: article`、固定草稿 ID、正文和专栏数组；不再使用该版本纯文字分支中的旧 `PUT /articles/<id>/publish`。发布前检查专栏管理权限，发布后必须回读到同一专栏的 `accepted` 归属。创建草稿取得 ID 后，在任何正文写入和公开发布前先保存该 ID；结果不明时仅按原 ID 只读核验，禁止重新提交。文章已发布但专栏尚未接受时保留文章 ID，不重复发文或提前归档。安装到本机独立 Python 环境：

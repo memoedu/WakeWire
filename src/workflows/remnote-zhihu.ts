@@ -49,6 +49,7 @@ export interface ArticleReceipt {
   stage: "submitting" | "published" | "verified" | "archived";
   bodyText?: string;
   firstPublishedAt?: string;
+  mentionBindings?: MentionBinding[];
   articleId?: string;
   columnId: string;
   url?: string;
@@ -77,6 +78,14 @@ export interface ArticleDraft {
   draftId?: string;
   editorUrl?: string;
   cloudBefore?: Pick<CloudDraft, "title" | "text" | "format">;
+  mentionBindings?: MentionBinding[];
+}
+export interface MentionBinding {
+  name: string;
+  id: string;
+}
+function mentionIdentity(bindings?: MentionBinding[]): string {
+  return JSON.stringify((bindings ?? []).map((binding) => [binding.name, binding.id]).sort());
 }
 
 export async function saveReviewDraft(options: {
@@ -226,7 +235,14 @@ export interface ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
     firstPublishedAt?: string,
-  ): Promise<{ title: string; html: string; text: string; format: string; hierarchyMode?: string }>;
+  ): Promise<{
+    title: string;
+    html: string;
+    text: string;
+    format: string;
+    hierarchyMode?: string;
+    mentionBindings?: MentionBinding[];
+  }>;
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }>;
   publish(title: string, html: string, draft?: ArticleDraft): Promise<{ id: string }>;
   seriesStats?(): Promise<SeriesStats>;
@@ -736,6 +752,8 @@ export async function runArticles(options: {
     (draft) => draft.source.remId === source.remId && draft.status === "ready",
   );
   if (savedDraft) {
+    if (mentionIdentity(savedDraft.mentionBindings) !== mentionIdentity(prepared.mentionBindings))
+      throw new Error("mention identity changed after review");
     if (
       !savedDraft.draftId ||
       !publisher.readDraft ||
@@ -807,6 +825,8 @@ export async function runArticles(options: {
     .format(options.currentTime?.() ?? options.now)
     .replaceAll("-", ".");
   const stamped = await publisher.prepare(source.nodes, firstPublishedAt);
+  if (mentionIdentity(stamped.mentionBindings) !== mentionIdentity(prepared.mentionBindings))
+    throw new Error("mention identity changed before submission");
   prepared.html = stamped.html;
   prepared.text = stamped.text;
   prepared.format = stamped.format;
