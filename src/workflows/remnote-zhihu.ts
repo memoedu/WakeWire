@@ -53,6 +53,7 @@ export interface ArticleReceipt {
   articleId?: string;
   columnId: string;
   url?: string;
+  archiveIssue?: string;
 }
 export interface ArticleState {
   receipts: ArticleReceipt[];

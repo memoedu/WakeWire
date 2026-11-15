@@ -170,7 +170,7 @@ export async function auditArticles(options: {
 
 export function articleFeedback(state: ArticleState, now: Date, phase: string, slot?: string) {
   const completed = new Set(
-    state.receipts.filter((r) => r.stage === "archived").map((r) => r.source.remId),
+    state.receipts.filter((r) => r.stage !== "submitting").map((r) => r.source.remId),
   );
   const articles = (state.reviews ?? [])
     .filter(
@@ -190,7 +190,11 @@ export function articleFeedback(state: ArticleState, now: Date, phase: string, s
     ...(state.reviewFailure ? [state.reviewFailure.issue] : []),
     ...state.receipts
       .filter((r) => r.stage !== "archived")
-      .map((r) => `《${r.title}》的既有发布记录尚未完成核验或归档，请先核对；系统不会重复发布。`),
+      .map((r) =>
+        r.stage === "verified"
+          ? `《${r.title}》已发布（${r.url}）；${r.archiveIssue ?? "RemNote 归档待完成。"}`
+          : `《${r.title}》的既有发布记录尚未完成核验或归档，请先核对；系统不会重复发布。`,
+      ),
   ];
   const issues = articles.filter((r) => r.status === "blocked").length + generalIssues.length;
   return {
