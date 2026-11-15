@@ -17,6 +17,7 @@ from zhihu_article_format import (
     format_structure,
     mention_names,
     apply_mentions,
+    canonical_cards,
     normalize,
     prepare as prepare_layout,
 )
@@ -26,7 +27,7 @@ logging.disable(logging.CRITICAL)
 
 def validate_links(html):
     parser = ArticleLayout()
-    parser.feed(html)
+    parser.feed(canonical_cards(html))
     for href in parser.links:
         parsed = urlparse(href)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -231,7 +232,13 @@ def write_draft(client, article_id, title, html, account_id, expected):
     if response.status_code != 200:
         raise ValueError("draft_save_failed")
     saved = read_draft(client, article_id)
-    if saved["title"] != title or saved["text"] != normalize(html) or saved["format"] != format_structure(html) or saved["state"] != "draft":
+    expected_format = format_structure(html)
+    if saved["format"] != expected_format:
+        expected_cards = [b for b in json.loads(expected_format)["blocks"] if b["kind"] == "card"]
+        saved_cards = [b for b in json.loads(saved["format"])["blocks"] if b["kind"] == "card"]
+        if expected_cards != saved_cards:
+            raise ValueError("article_link_card_readback_mismatch")
+    if saved["title"] != title or saved["text"] != normalize(html) or saved["format"] != expected_format or saved["state"] != "draft":
         raise ValueError("draft_readback_mismatch")
     return saved
 

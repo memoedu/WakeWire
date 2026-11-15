@@ -306,6 +306,19 @@ describe("RemNote to Zhihu publishing", () => {
     expect(await auditArticles(f.audit)).toMatchObject({ approved: 2, blocked: 0 });
     expect(articleFeedback(f.state, f.options.now, "audit").issues).toBe(0);
   });
+  it("reports a card readback failure in the existing review feedback and keeps it unapproved", async () => {
+    const f = reviewFixture(),
+      prepare = f.publisher.prepare;
+    f.publisher.prepare = async (rows) => {
+      if (rows[0]?.remId === "one") throw Error("article_link_card_readback_mismatch");
+      return prepare(rows);
+    };
+    expect(await auditArticles(f.audit)).toMatchObject({ approved: 1, blocked: 1, published: 0 });
+    const feedback = articleFeedback(f.state, f.options.now, "audit");
+    expect(feedback.articles.find((a) => a.title === "first")?.issues[0]).toContain("知乎卡片");
+    expect(f.state.reviews?.find((r) => r.sourceRemId === "one")?.status).toBe("blocked");
+    expect(f.posts()).toBe(0);
+  });
   it("preserves human-held review drafts and author edits", async () => {
     const f = reviewFixture();
     await saveReviewDraft({ ...f.audit, sourceRemId: "one" });
