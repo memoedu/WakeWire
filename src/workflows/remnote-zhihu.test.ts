@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RemNode, RemNoteReader } from "./remnote-todo.js";
+import { RemNoteMcp } from "./remnote-todo-cli.js";
 import {
   type ArticlePublisher,
   type ArticleReader,
@@ -15,6 +16,7 @@ import {
   seriesTitle,
   snapshotArticle,
 } from "./remnote-zhihu.js";
+import { ArticleRemNoteMcp } from "./remnote-zhihu-cli.js";
 import { articleFeedback, auditArticles } from "./remnote-zhihu-review.js";
 
 function fixture() {
@@ -156,6 +158,27 @@ function taggedFixture() {
 }
 
 describe("RemNote to Zhihu publishing", () => {
+  it("checks the configured knowledge base before accessing any source notes", async () => {
+    const connect = vi.spyOn(RemNoteMcp.prototype, "connect").mockResolvedValue();
+    const calls: string[] = [];
+    class Probe extends ArticleRemNoteMcp {
+      protected override async call(name: string): Promise<unknown> {
+        calls.push(name);
+        return { knowledgeBaseId: "expected-library" };
+      }
+    }
+    try {
+      await expect(
+        new Probe().connect("http://127.0.0.1:1/mcp", "foreign-library"),
+      ).rejects.toThrow("knowledge base changed");
+      await expect(
+        new Probe().connect("http://127.0.0.1:1/mcp", "expected-library"),
+      ).resolves.toBeUndefined();
+      expect(calls).toEqual(["remnote_status", "remnote_status"]);
+    } finally {
+      connect.mockRestore();
+    }
+  });
   function reviewFixture() {
     const f = fixture();
     const cloud = new Map<
