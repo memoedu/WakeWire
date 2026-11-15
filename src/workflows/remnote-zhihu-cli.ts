@@ -13,6 +13,7 @@ import {
   type ArticleState,
   adoptPublishedArticle,
   type CloudDraft,
+  type MentionBinding,
   runArticles,
   type SeriesStats,
   saveReviewDraft,
@@ -38,6 +39,9 @@ const Config = z.object({
   aiGeneratedTagRemId: z
     .string()
     .regex(/^[A-Za-z0-9_-]+$/u)
+    .optional(),
+  mentionBindings: z
+    .array(z.object({ name: z.string().min(1).max(100), id: z.string().regex(/^[a-f0-9]{32}$/u) }))
     .optional(),
 });
 type Config = z.infer<typeof Config>;
@@ -168,6 +172,7 @@ export class ZhihuPublisher implements ArticlePublisher {
     text: string;
     format: string;
     hierarchyMode?: string;
+    mentionBindings?: MentionBinding[];
   }> {
     return this.call("prepare", {
       nodes,
@@ -175,6 +180,7 @@ export class ZhihuPublisher implements ArticlePublisher {
       ...(this.config.aiGeneratedTagRemId
         ? { aiGeneratedTagRemId: this.config.aiGeneratedTagRemId }
         : {}),
+      ...(this.config.mentionBindings ? { mentionBindings: this.config.mentionBindings } : {}),
     });
   }
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }> {

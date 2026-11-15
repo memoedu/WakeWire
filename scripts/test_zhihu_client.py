@@ -16,6 +16,58 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_mentions_split_across_style_runs_cannot_silently_remain_plain(self):
+        html = '<p>来自@<strong>Example</strong> 的观点</p>'
+        self.assertEqual(adapter.mention_names(html), ["Example"])
+        with self.assertRaisesRegex(ValueError, "split_format_unsupported"):
+            adapter.apply_mentions(html, [{"name": "Example", "id": "a" * 32}])
+        self.assertEqual(adapter.mention_names('<p>person<strong>@example.com</strong></p>'), [])
+
+    def test_native_member_mention_preserves_prose_and_validates_identity(self):
+        nodes = [{"text": "Mention example", "depth": 0}, {"text": "来自@示例老师 的课程与观点", "depth": 1}]
+        result = adapter.prepare(nodes, mention_bindings=[{"name": "示例老师", "id": "a" * 32}])
+        self.assertIn('class="member_mention"', result["html"])
+        self.assertIn('data-hash="' + "a" * 32 + '"', result["html"])
+        self.assertEqual(result["text"], "来自@示例老师的课程与观点")
+        self.assertIn(["mention", "a" * 32, 2], json.loads(result["format"])["styles"])
+        ordinary = result["html"].replace('class="member_mention"', '')
+        self.assertNotEqual(adapter.format_structure(ordinary), result["format"])
+        self.assertEqual(adapter.format_structure(result["html"].replace('https://www.zhihu.com/people/', 'http://www.zhihu.com/people/')), result["format"])
+        self.assertEqual(adapter.format_structure(result["html"].replace('https://www.zhihu.com/people/', '//www.zhihu.com/people/')), result["format"])
+        with self.assertRaisesRegex(ValueError, "mention_unresolved"):
+            adapter.prepare(nodes)
+
+    def test_email_code_math_and_existing_links_are_not_reinterpreted_as_mentions(self):
+        result = adapter.prepare([{"text": "Literal contexts", "depth": 0},
+                                  {"text": "Contact person@example.com; `@decorator` and $x@ y$ plus [@link](https://example.com/)", "depth": 1}])
+        self.assertNotIn('member_mention', result["html"])
+        self.assertEqual(result["mentionBindings"], [])
+
+    def test_authenticated_binding_is_reused_and_profile_mismatch_blocks(self):
+        client = MagicMock()
+        identity = {"name": "示例老师", "id": "a" * 32}
+        client._get.return_value = dict(identity)
+        self.assertEqual(adapter.resolve_mentions(client, ["示例老师"], [identity]), [identity])
+        client.search.assert_not_called()
+        client._get.return_value = {"name": "Different person", "id": "a" * 32}
+        with self.assertRaisesRegex(ValueError, "profile_changed"):
+            adapter.resolve_mentions(client, ["示例老师"], [identity])
+        client._session.post.assert_not_called()
+
+    def test_people_resolution_requires_complete_unique_exact_results(self):
+        client = MagicMock()
+        person = {"type": "people", "name": "<em>Example</em>", "id": "b" * 32}
+        client.search.side_effect = [{"data": [{"object": person}], "paging": {"is_end": False}}, {"data": [], "paging": {"is_end": True}}]
+        client._get.return_value = {"name": "Example", "id": "b" * 32}
+        self.assertEqual(adapter.resolve_mentions(client, ["Example"], []), [{"name": "Example", "id": "b" * 32}])
+        client.search.side_effect = None
+        client.search.return_value = {"data": [{"object": person}, {"object": {**person, "id": "c" * 32}}], "paging": {"is_end": True}}
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            adapter.resolve_mentions(client, ["Example"], [])
+        client.search.return_value = {"data": [{"object": person}], "paging": {"is_end": False}}
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            adapter.resolve_mentions(client, ["Example"], [])
+
     def test_ai_ranges_have_one_parent_badge_without_automatic_italics(self):
         ai = [{"tagRemId": "ai-native", "name": "AI Generated"}]
         result = adapter.prepare([

@@ -877,6 +877,40 @@ describe("RemNote to Zhihu publishing", () => {
     expect(f.nodes.get("one")?.title).toBe("%first");
     expect(f.nodes.get("two")?.parentRemId).toBe("published");
   });
+  it("stops if a mention target changes while preparing the final timestamp", async () => {
+    const f = fixture();
+    const prepare = f.publisher.prepare;
+    let preparations = 0;
+    f.publisher.prepare = async (rows) => ({
+      ...(await prepare(rows)),
+      mentionBindings: [{ name: "Example", id: (++preparations === 1 ? "a" : "b").repeat(32) }],
+    });
+    await expect(runArticles(f.options)).rejects.toThrow(
+      "mention identity changed before submission",
+    );
+    expect(f.posts()).toBe(0);
+    expect(f.state.receipts).toHaveLength(0);
+  });
+  it("preserves the reviewed mention identity even if a new resolution chooses another account", async () => {
+    const f = fixture();
+    const source = await snapshotArticle(f.remnote, "one");
+    const prepared = await f.publisher.prepare(source.nodes);
+    f.state.drafts = [
+      {
+        source,
+        ...prepared,
+        status: "ready",
+        draftId: "777",
+        mentionBindings: [{ name: "Example", id: "a".repeat(32) }],
+      },
+    ];
+    f.publisher.prepare = async () => ({
+      ...prepared,
+      mentionBindings: [{ name: "Example", id: "b".repeat(32) }],
+    });
+    await expect(runArticles(f.options)).rejects.toThrow("mention identity changed after review");
+    expect(f.posts()).toBe(0);
+  });
   it("preserves cloud edits made after draft approval", async () => {
     const f = fixture();
     const source = await snapshotArticle(f.remnote, "one");

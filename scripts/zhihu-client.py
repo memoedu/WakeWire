@@ -15,6 +15,8 @@ from zhihu_article_format import (
     ArticleLayout,
     VisibleText,
     format_structure,
+    mention_names,
+    apply_mentions,
     normalize,
     prepare as prepare_layout,
 )
@@ -31,9 +33,54 @@ def validate_links(html):
             raise ValueError("article_link_unsupported")
 
 
-def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
+def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, mention_bindings=None):
     result = prepare_layout(nodes, first_published_at, ai_generated_tag_rem_id)
+    bindings = mention_bindings or []
+    result["html"] = apply_mentions(result["html"], bindings)
+    result["text"] = normalize(result["html"])
+    result["format"] = format_structure(result["html"])
+    result["mentionBindings"] = sorted(bindings, key=lambda item: item["name"])
     validate_links(result["html"])
+    return result
+
+
+def resolve_mentions(client, names, configured):
+    bindings = {}
+    for item in configured:
+        if item["name"] in bindings or not re.fullmatch(r"[a-f0-9]{32}", item["id"]):
+            raise ValueError("mention_binding_invalid")
+        bindings[item["name"]] = item["id"]
+    if len(names) > 8:
+        raise ValueError("mention_batch_too_large")
+    result = []
+    for name in names:
+        member_id = bindings.get(name)
+        if not member_id:
+            candidates = set()
+            offset = 0
+            for page_index in range(3):
+                page = client.search(name, search_type="people", offset=offset, limit=20)
+                items = page.get("data", [])
+                for item in items:
+                    person = item.get("object", item)
+                    parsed = VisibleText()
+                    parsed.feed(person.get("name", ""))
+                    if person.get("type") == "people" and "".join(parsed.parts) == name:
+                        candidates.add(person.get("id", ""))
+                if not items or page.get("paging", {}).get("is_end") is True:
+                    break
+                offset += len(items)
+            else:
+                raise ValueError("mention_search_incomplete")
+            if len(candidates) != 1:
+                raise ValueError("mention_ambiguous_or_missing")
+            member_id = next(iter(candidates))
+        if not re.fullmatch(r"[a-f0-9]{32}", member_id):
+            raise ValueError("mention_identity_invalid")
+        profile = client._get(f"https://www.zhihu.com/api/v4/members/{member_id}", {"include": "id,name,url_token"})
+        if profile.get("id") != member_id or profile.get("name") != name:
+            raise ValueError("mention_profile_changed")
+        result.append({"name": name, "id": member_id})
     return result
 
 
@@ -236,7 +283,15 @@ def publish_in_column(client, title, html, column_id):
 def main(request):
     action = request["action"]
     if action == "prepare":
-        result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"))
+        base = prepare_layout(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"))
+        names = mention_names(base["html"])
+        bindings = []
+        if names:
+            with load_client(request["snapshotPath"]) as client:
+                if client.get_self_info().get("id") != request["expectedAccountId"]:
+                    raise ValueError("account_changed")
+                bindings = resolve_mentions(client, names, request.get("mentionBindings", []))
+        result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), bindings)
         validate_links(result["html"])
         return result
     with load_client(request["snapshotPath"]) as client:
