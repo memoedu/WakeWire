@@ -295,7 +295,7 @@ class ArticleLayout(HTMLParser):
             if "member_mention" in attributes.get("class", "").split():
                 member_id = attributes.get("data-hash", "")
                 parsed = urlparse(href)
-                if not re.fullmatch(r"[a-f0-9]{32}", member_id) or parsed.scheme not in ("", "http", "https") or parsed.hostname != "www.zhihu.com" or parsed.username or parsed.password or not re.fullmatch(r"/people/[A-Za-z0-9_-]+/?", parsed.path):
+                if not re.fullmatch(r"[a-f0-9]{32}", member_id) or parsed.scheme not in ("", "http", "https") or parsed.hostname != "www.zhihu.com" or parsed.username or parsed.password or parsed.path.rstrip('/') != "/people/" + member_id:
                     raise ValueError("mention_identity_invalid")
                 href = "https://www.zhihu.com/people/" + member_id
                 self.styles.append(["mention", member_id, self.visible_offset])

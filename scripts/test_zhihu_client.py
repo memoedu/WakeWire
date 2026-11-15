@@ -34,6 +34,8 @@ class AdapterTests(unittest.TestCase):
         self.assertNotEqual(adapter.format_structure(ordinary), result["format"])
         self.assertEqual(adapter.format_structure(result["html"].replace('https://www.zhihu.com/people/', 'http://www.zhihu.com/people/')), result["format"])
         self.assertEqual(adapter.format_structure(result["html"].replace('https://www.zhihu.com/people/', '//www.zhihu.com/people/')), result["format"])
+        with self.assertRaisesRegex(ValueError, "mention_identity_invalid"):
+            adapter.format_structure(result["html"].replace('/people/' + 'a' * 32, '/people/' + 'b' * 32))
         with self.assertRaisesRegex(ValueError, "mention_unresolved"):
             adapter.prepare(nodes)
 
