@@ -22,6 +22,7 @@ import {
   saveReviewDraft,
   scanArticles,
 } from "./remnote-zhihu.js";
+import { archivePreparedArticles, publishPreparedArticles } from "./remnote-zhihu-publish.js";
 import { articleFeedback, auditArticles, reviewIssue } from "./remnote-zhihu-review.js";
 
 const Config = z.object({
@@ -382,11 +383,25 @@ async function main(): Promise<void> {
     ? lock(path.join(home, "run.lock"))
     : () => {};
   const remnote = new ArticleRemNoteMcp();
+  let remnoteConnected = false;
+  const reader = async () => {
+    if (!remnoteConnected) {
+      await remnote.connect(config.mcpUrl, config.knowledgeBaseId);
+      remnoteConnected = true;
+    }
+    return remnote;
+  };
+  const now = new Date();
+  const preparedPublication =
+    action === "publish-now" ||
+    Boolean(
+      config.requirePreflight && (action === "run" || (action === "tick" && publicationSlot(now))),
+    );
   let activeState: ArticleState | undefined;
   try {
     if (["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action))
       activeState = readState(path.join(home, "state.json"));
-    await remnote.connect(config.mcpUrl, config.knowledgeBaseId);
+    if (!preparedPublication && action !== "approve-draft") await reader();
     const publisher = new ZhihuPublisher(config);
     if (
       ["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action)
@@ -406,10 +421,50 @@ async function main(): Promise<void> {
         ...(config.requirePreflight ? { requirePreflight: true } : {}),
         save: () => atomicJson(stateFile, state),
       };
-      const now = new Date();
+      if (preparedPublication) {
+        const result = await publishPreparedArticles({
+          ...shared,
+          now,
+          currentTime: () => new Date(),
+          ...(action === "publish-now" ? { manualSourceRemId: sourceRemId as string } : {}),
+          ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
+        });
+        if (result.status === "published") {
+          delete state.reviewFailure;
+          shared.save();
+        }
+        const report = () => {
+          const finishedAt = new Date().toISOString();
+          const feedback = {
+            ...articleFeedback(state, new Date(), "publish", publicationSlot(new Date())),
+            publications: result.publications,
+          };
+          const summary =
+            result.published || result.publications.length
+              ? `文章已发布并完成知乎回读。${result.archivePending ? `RemNote 归档待完成 ${result.archivePending} 篇，恢复连接后补做。` : "归档已完成。"}`
+              : result.archivePending
+                ? `已发布文章仍有 ${result.archivePending} 篇待归档。`
+                : "本次未发布新文章。";
+          const value = {
+            at: finishedAt,
+            finishedAt,
+            ...result,
+            issues: feedback.issues,
+            summary,
+            feedback,
+          };
+          atomicJson(path.join(home, "last-run.json"), value);
+          return value;
+        };
+        report(); // Persist publication status before any attempt to connect to RemNote.
+        Object.assign(result, await archivePreparedArticles({ ...shared, reader }));
+        console.log(JSON.stringify(report()));
+        return;
+      }
       const audit = action === "audit" || (action === "tick" && !publicationSlot(now));
       if (audit) {
         if (!config.seriesStartDate) throw new Error("series start date is required for review");
+        const recovered = await archivePreparedArticles({ ...shared, reader });
         const slot = reviewSlot(now) ?? nextPublicationSlot(now);
         const result = await auditArticles({
           ...shared,
@@ -417,6 +472,7 @@ async function main(): Promise<void> {
           slot,
           seriesStartDate: config.seriesStartDate,
         });
+        result.archived = recovered.archived;
         const feedback = articleFeedback(state, new Date(), "audit", slot);
         const finishedAt = new Date().toISOString();
         const summary = `格式审核完成：通过 ${result.approved} 篇，待处理 ${feedback.issues} 项。${result.reviewed ? "审核通过稿件等待正式发布时点。" : "当前没有符合条件的待发布文章。"}`;
