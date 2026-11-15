@@ -13,6 +13,18 @@ def compact(text):
     return re.sub(r"[ \t\r\n\f\v]+", "", text)
 
 
+def canonical_link(href):
+    url = urlparse(href)
+    if url.scheme == "https" and url.hostname == "link.zhihu.com" and url.path in ("", "/") and not url.fragment:
+        query = parse_qs(url.query)
+        if set(query) == {"target"} and len(query["target"]) == 1:
+            target = query["target"][0]
+            parsed = urlparse(target)
+            if parsed.scheme in ("http", "https") and parsed.hostname and not parsed.username and not parsed.password:
+                return target
+    return href
+
+
 class VisibleText(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -192,7 +204,7 @@ class ArticleLayout(HTMLParser):
         if tag == "pre":
             self.pre_depth += 1
         if tag == "a":
-            href = dict(attrs).get("href", "")
+            href = canonical_link(dict(attrs).get("href", ""))
             self.links.append(href)
             self.styles.append(["+a", href, self.visible_offset])
 

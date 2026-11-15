@@ -89,6 +89,8 @@ pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <ab
 
 用户明确要求立即发布已经审核的草稿时，可使用 `publish-now` 指定唯一来源。它要求该来源已有状态为 `ready` 的已知云端草稿，复用原锁、提交围栏、账号和内容核验及归档，不选择其他稿件。此操作不受日常窗口限制，记录独立手动时段；普通 `run` 仍受原窗口约束。
 
+发布后允许有限次只读等待公开可见状态，不重放发布。知乎为站外链接添加的 `link.zhihu.com/?target=...` 仅在精确主机、路径和单个安全 HTTP(S) 目标满足条件时还原为目标地址核验；不访问跳转，也不把不同目标判为相同。
+
 ```powershell
 npm run typecheck
 npm test

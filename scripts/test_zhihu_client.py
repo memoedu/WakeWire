@@ -178,8 +178,23 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result["columnIds"], [])
         self.assertEqual(json.loads(result["format"])["blocks"], [{"kind": "paragraph", "depth": 0, "text": "One&two"}])
         client._get.return_value["state"] = "draft"
-        with self.assertRaisesRegex(ValueError, "not_published"):
+        with patch.object(adapter.time, "sleep"), self.assertRaisesRegex(ValueError, "not_published"):
             adapter.read_article(client, "123")
+
+    def test_platform_link_wrapper_preserves_exact_target_and_cannot_hide_changed_links(self):
+        direct = '<p><a href="https://example.com/page?q=1&amp;x=2">Reference</a></p>'
+        wrapped = '<p><a href="https://link.zhihu.com/?target=https%3A%2F%2Fexample.com%2Fpage%3Fq%3D1%26x%3D2">Reference</a></p>'
+        self.assertEqual(adapter.format_structure(direct), adapter.format_structure(wrapped))
+        self.assertNotEqual(adapter.format_structure(direct), adapter.format_structure(wrapped.replace('example.com', 'different.example')))
+
+    def test_public_visibility_retry_is_read_only(self):
+        client = MagicMock()
+        client._get.side_effect = [{"state": "draft"}, {"id": "123", "state": "published", "content": "<p>Independent public body</p>"}]
+        with patch.object(adapter.time, "sleep") as sleep:
+            self.assertEqual(adapter.read_article(client, "123")["id"], "123")
+        sleep.assert_called_once_with(2)
+        self.assertEqual(client._get.call_count, 2)
+        client._session.post.assert_not_called()
 
     def test_title_and_body_limits_never_truncate_or_generate_content(self):
         for nodes in (
