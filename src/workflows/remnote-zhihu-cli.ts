@@ -59,6 +59,7 @@ export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
         contentMode: "none",
         view: "full",
         includeMediaMetadata: true,
+        renderNativeMarkdown: true,
       }),
     );
   }
@@ -149,8 +150,9 @@ export class ZhihuPublisher implements ArticlePublisher {
   }
   prepare(
     nodes: ArticleNode[],
+    firstPublishedAt?: string,
   ): Promise<{ title: string; html: string; text: string; format: string }> {
-    return this.call("prepare", { nodes });
+    return this.call("prepare", { nodes, ...(firstPublishedAt ? { firstPublishedAt } : {}) });
   }
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }> {
     return this.call("check");
@@ -321,6 +323,7 @@ async function main(): Promise<void> {
           seriesStartDate: config.seriesStartDate,
           now: new Date(),
           ...(sourceRemId ? { sourceRemId } : {}),
+          ...(articleId === "--new-version" ? { newVersion: true } : {}),
         });
         console.log(JSON.stringify(result));
         return;

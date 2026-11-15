@@ -20,7 +20,7 @@ function fixture() {
     ["published", { remId: "published", title: "已发布", parentRemId: "doc" }],
     ["old", { remId: "old", title: "%archived", parentRemId: "published" }],
     ["group", { remId: "group", title: "PRIVATE PARENT", parentRemId: "doc" }],
-    ["one", { remId: "one", title: "%first", parentRemId: "group" }],
+    ["one", { remId: "one", title: "%first", parentRemId: "doc" }],
     ["child", { remId: "child", title: "detail text", parentRemId: "one" }],
     ["sibling", { remId: "sibling", title: "PRIVATE SIBLING", parentRemId: "group" }],
     ["two", { remId: "two", title: "%second", parentRemId: "doc" }],
@@ -304,8 +304,18 @@ describe("RemNote to Zhihu publishing", () => {
     expect(publicationSlot(new Date("2026-11-14T14:45:00Z"))).toBeUndefined();
     expect(publicationSlot(new Date("2026-11-14T15:30:00Z"))).toBeUndefined();
   });
-  it("scans depth first, excludes archives, and exports only the marked subtree", async () => {
+  it("scans only marked direct article roots and ignores percent markers in unmarked bodies", async () => {
     const f = fixture();
+    f.nodes.set("body-marker", {
+      remId: "body-marker",
+      title: "%Not an article",
+      parentRemId: "group",
+    });
+    const read = f.remnote.read;
+    f.remnote.read = async (id) => {
+      if (id === "body-marker") throw new Error("must not scan this body");
+      return read(id);
+    };
     const scan = await scanArticles(f.remnote, "doc");
     expect(scan.sources.map((s) => s.remId)).toEqual(["one", "two"]);
     expect(scan.sources[0]?.nodes.map((n) => n.text)).toEqual(["first", "detail text"]);
@@ -318,16 +328,29 @@ describe("RemNote to Zhihu publishing", () => {
       "two",
     ]);
   });
-  it("keeps ambiguous parent/child markers together and publishes neither", async () => {
+  it("preserves percent-prefixed body nodes inside one complete article", async () => {
     const f = fixture();
     (f.nodes.get("child") as RemNode).title = "%nested";
     const scan = await scanArticles(f.remnote, "doc");
-    expect(scan.blocked).toEqual(["one"]);
-    expect(scan.sources.map((s) => s.remId)).toEqual(["two"]);
+    expect(scan.blocked).toEqual([]);
+    expect(scan.sources.map((s) => s.remId)).toEqual(["one", "two"]);
+    expect(scan.sources[0]?.nodes[1]?.text).toBe("%nested");
+  });
+  it("blocks publication when the native editor would flatten a sixth list level", async () => {
+    const f = fixture();
+    let parentRemId = "child";
+    for (let depth = 2; depth <= 6; depth++) {
+      const remId = `deep-${depth}`;
+      f.nodes.set(remId, { remId, title: `Independent level ${depth}`, parentRemId });
+      parentRemId = remId;
+    }
+    await expect(runArticles(f.options)).rejects.toThrow("five list levels");
+    expect(f.posts()).toBe(0);
+    expect(f.state.receipts).toHaveLength(0);
   });
   it("treats double percent as a disabled subtree", async () => {
     const f = fixture();
-    (f.nodes.get("group") as RemNode).title = "%%hold";
+    (f.nodes.get("one") as RemNode).title = "%%hold";
     expect((await scanArticles(f.remnote, "doc")).sources.map((s) => s.remId)).toEqual(["two"]);
   });
   it("blocks media and unresolved references instead of silently omitting them", async () => {
@@ -411,7 +434,7 @@ describe("RemNote to Zhihu publishing", () => {
     };
     await expect(runArticles(f.options)).rejects.toThrow("connection lost");
     await expect(runArticles(f.options)).rejects.toThrow("unknown publication");
-    expect(f.nodes.get("one")?.parentRemId).toBe("group");
+    expect(f.nodes.get("one")?.parentRemId).toBe("doc");
   });
   it("never posts if saving the fence fails", async () => {
     const f = fixture();
@@ -434,7 +457,7 @@ describe("RemNote to Zhihu publishing", () => {
     });
     await expect(runArticles(f.options)).rejects.toThrow("readback mismatch");
     expect(f.state.receipts[0]?.stage).toBe("published");
-    expect(f.nodes.get("one")?.parentRemId).toBe("group");
+    expect(f.nodes.get("one")?.parentRemId).toBe("doc");
   });
   it("recovers a verified publication after move failure without posting again", async () => {
     const f = fixture();
@@ -472,7 +495,7 @@ describe("RemNote to Zhihu publishing", () => {
     };
     await expect(runArticles(f.options)).rejects.toThrow("source changed after");
     expect(f.nodes.get("child")?.title).toBe("new draft");
-    expect(f.nodes.get("one")?.parentRemId).toBe("group");
+    expect(f.nodes.get("one")?.parentRemId).toBe("doc");
   });
   it("blocks same content in another source node", async () => {
     const f = fixture();
@@ -488,7 +511,7 @@ describe("RemNote to Zhihu publishing", () => {
     const verify = f.publisher.verify;
     f.publisher.verify = async (id) => ({ ...(await verify(id)), format: "[flattened]" });
     await expect(runArticles(f.options)).rejects.toThrow("readback mismatch");
-    expect(f.nodes.get("one")?.parentRemId).toBe("group");
+    expect(f.nodes.get("one")?.parentRemId).toBe("doc");
   });
   it("requires an exact Document and complete pagination", async () => {
     const f = fixture();
@@ -504,7 +527,7 @@ describe("RemNote to Zhihu publishing", () => {
     f.publisher.verify = async (id) => ({ ...(await verify(id)), columnIds: [] });
     await expect(runArticles(f.options)).rejects.toThrow("readback mismatch");
     expect(f.state.receipts[0]?.stage).toBe("published");
-    expect(f.nodes.get("one")?.parentRemId).toBe("group");
+    expect(f.nodes.get("one")?.parentRemId).toBe("doc");
     f.publisher.verify = verify;
     await runArticles(f.options);
     expect(f.posts()).toBe(1);
@@ -549,7 +572,7 @@ describe("RemNote to Zhihu publishing", () => {
     ).rejects.toThrow("does not match");
     expect(f.posts()).toBe(0);
     expect(f.state.receipts).toHaveLength(0);
-    expect(f.nodes.get("one")?.parentRemId).toBe("group");
+    expect(f.nodes.get("one")?.parentRemId).toBe("doc");
   });
   it("numbers published articles and calendar days separately in Shanghai", () => {
     const state: ArticleState = { receipts: [] };
@@ -607,6 +630,12 @@ describe("RemNote to Zhihu publishing", () => {
   });
   it("stores a real draft for review without consuming a publication or moving its source", async () => {
     const f = fixture();
+    const prepare = f.publisher.prepare;
+    const stamps: Array<string | undefined> = [];
+    f.publisher.prepare = async (rows, stamp) => {
+      stamps.push(stamp);
+      return prepare(rows);
+    };
     let creates = 0;
     let cloud = {
       id: "777",
@@ -641,6 +670,7 @@ describe("RemNote to Zhihu publishing", () => {
       moved: 0,
     });
     expect(f.state.receipts).toHaveLength(0);
+    expect(stamps).toEqual(["待发布"]);
     expect(f.nodes.get("one")?.title).toBe("%first");
     await saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" });
     expect(creates).toBe(1);
@@ -656,6 +686,33 @@ describe("RemNote to Zhihu publishing", () => {
       saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" }),
     ).rejects.toThrow("author edits");
     expect(cloud.title).toBe("Author edit");
+  });
+  it("persists the first submission time and compares duplicates without a changing footer", async () => {
+    const f = fixture();
+    const prepare = f.publisher.prepare;
+    f.publisher.prepare = async (rows, stamp) => {
+      const body = await prepare(rows);
+      return stamp
+        ? {
+            ...body,
+            html: `${body.html}<p>首次发布时间：${stamp}</p>`,
+            text: `${body.text}${stamp}`,
+          }
+        : body;
+    };
+    await runArticles(f.options);
+    expect(f.state.receipts[0]).toMatchObject({
+      bodyText: "detail text",
+      firstPublishedAt: "2026.11.14 11:30",
+      text: "detail text2026.11.14 11:30",
+    });
+    (f.nodes.get("two") as RemNode).title = "%first";
+    (f.nodes.get("child2") as RemNode).title = "detail text";
+    await expect(
+      runArticles({ ...f.options, now: new Date("2026-11-14T09:30:00Z") }),
+    ).rejects.toThrow("duplicate article");
+    expect(f.posts()).toBe(1);
+    expect(f.state.receipts[0]?.firstPublishedAt).toBe("2026.11.14 11:30");
   });
   it("does not recreate a draft after an unknown creation result", async () => {
     const f = fixture();
@@ -678,6 +735,49 @@ describe("RemNote to Zhihu publishing", () => {
       saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" }),
     ).rejects.toThrow("unknown draft");
     expect(attempts).toBe(1);
+    expect(f.posts()).toBe(0);
+  });
+  it("preserves an edited draft only when a new version is explicitly requested", async () => {
+    const f = fixture();
+    const source = await snapshotArticle(f.remnote, "one");
+    const prepared = await f.publisher.prepare(source.nodes);
+    f.state.drafts = [{ source, ...prepared, status: "review", draftId: "777" }];
+    f.publisher.seriesStats = async () => ({ publishedCount: 1, maxOrdinal: 1 });
+    const old = {
+      ...prepared,
+      id: "777",
+      title: "Author edit",
+      authorId: "account",
+      state: "draft",
+      editorUrl: "https://zhuanlan.zhihu.com/p/777/edit",
+    };
+    let fresh = {
+      ...old,
+      id: "888",
+      title: "",
+      html: "",
+      text: "",
+      editorUrl: "https://zhuanlan.zhihu.com/p/888/edit",
+    };
+    f.publisher.readDraft = async (id) => (id === "777" ? old : fresh);
+    f.publisher.createDraft = async () => ({ id: "888" });
+    f.publisher.writeDraft = async (_id, title, html) => {
+      fresh = { ...fresh, title, html, text: prepared.text };
+      return fresh;
+    };
+    await expect(
+      saveReviewDraft({ ...f.options, sourceRemId: "one", seriesStartDate: "2026-11-13" }),
+    ).rejects.toThrow("author edits");
+    const result = await saveReviewDraft({
+      ...f.options,
+      sourceRemId: "one",
+      seriesStartDate: "2026-11-13",
+      newVersion: true,
+    });
+    expect(result.id).toBe("888");
+    expect(old.title).toBe("Author edit");
+    expect(f.state.previousDrafts?.[0]?.draftId).toBe("777");
+    expect(f.state.drafts?.map((d) => d.draftId)).toEqual(["888"]);
     expect(f.posts()).toBe(0);
   });
   it("publishes an approved draft using the saved cloud identity and final series title", async () => {

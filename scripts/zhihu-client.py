@@ -31,8 +31,8 @@ def validate_links(html):
             raise ValueError("article_link_unsupported")
 
 
-def prepare(nodes):
-    result = prepare_layout(nodes)
+def prepare(nodes, first_published_at=None):
+    result = prepare_layout(nodes, first_published_at)
     validate_links(result["html"])
     return result
 
@@ -148,10 +148,10 @@ def series_stats(client, column_id):
 def read_draft(client, article_id):
     if not re.fullmatch(r"\d+", article_id):
         raise ValueError("invalid_draft_id")
-    url = f"https://zhuanlan.zhihu.com/api/articles/{article_id}"
+    url = f"https://zhuanlan.zhihu.com/api/articles/{article_id}/draft"
     response = client._session.get(url, timeout=15)
     if response.status_code == 404:
-        article = client._get(url + "/draft")
+        article = client._get(url.removesuffix("/draft"))
     elif response.status_code == 200:
         article = response.json()
     else:
@@ -231,7 +231,7 @@ def publish_in_column(client, title, html, column_id):
 def main(request):
     action = request["action"]
     if action == "prepare":
-        result = prepare(request["nodes"])
+        result = prepare(request["nodes"], request.get("firstPublishedAt"))
         validate_links(result["html"])
         return result
     with load_client(request["snapshotPath"]) as client:

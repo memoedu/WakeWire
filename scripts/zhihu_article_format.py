@@ -2,7 +2,9 @@
 
 import json
 import re
+from html import escape
 from html.parser import HTMLParser
+from urllib.parse import quote, parse_qs, urlparse
 
 from markdown_it import MarkdownIt
 
@@ -18,6 +20,66 @@ class VisibleText(HTMLParser):
 
     def handle_data(self, data):
         self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs):
+        formula = equation(tag, attrs)
+        if formula:
+            self.parts.append("$" + formula[1] + "$")
+
+
+def equation(tag, attrs):
+    """Read the first-party equation image, including LaTeX in text validation."""
+    attrs = dict(attrs)
+    if tag != "img" or attrs.get("eeimg") not in ("1", "2"):
+        return None
+    # The persisted draft endpoint sanitizes equation src to an empty string.
+    # The editor still constructs the native formula entity from eeimg + alt
+    # and renders it as MathJax SVG. LaTeX remains part of the comparison.
+    if not attrs.get("src"):
+        if not attrs.get("alt"):
+            raise ValueError("article_equation_latex_missing")
+        return attrs["eeimg"], attrs["alt"]
+    src = urlparse(attrs.get("src", ""))
+    if src.scheme not in ("", "https") or src.hostname != "www.zhihu.com" or src.path != "/equation":
+        raise ValueError("article_equation_source_invalid")
+    tex = parse_qs(src.query).get("tex", [None])[0]
+    if not tex or attrs.get("alt") != tex:
+        raise ValueError("article_equation_latex_mismatch")
+    return attrs["eeimg"], tex
+
+
+def math_inline(state, silent):
+    start = state.pos
+    if state.src[start] != "$":
+        return False
+    delimiter = "$$" if state.src.startswith("$$", start) else "$"
+    content_start = start + len(delimiter)
+    if content_start >= state.posMax or state.src[content_start].isspace():
+        return False
+    end = content_start
+    while True:
+        end = state.src.find(delimiter, end)
+        if end < 0:
+            return False
+        slashes = len(state.src[:end]) - len(state.src[:end].rstrip("\\"))
+        if slashes % 2 == 0:
+            break
+        end += len(delimiter)
+    tex = state.src[content_start:end]
+    if not tex or tex[-1].isspace() or (delimiter == "$" and "\n" in tex):
+        return False
+    if not silent:
+        token = state.push("zhihu_math", "", 0)
+        token.content = tex
+        token.meta = {"mode": "2" if delimiter == "$$" else "1"}
+    state.pos = end + len(delimiter)
+    return True
+
+
+def render_math(tokens, idx, options, env):
+    token = tokens[idx]
+    return ('<img eeimg="' + token.meta["mode"] + '" src="//www.zhihu.com/equation?tex='
+            + quote(token.content, safe="") + '" alt="' + escape(token.content, quote=True) + '"/>')
 
 
 def normalize(html):
@@ -43,6 +105,11 @@ class ArticleLayout(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         tag = {"b": "strong", "i": "em"}.get(tag, tag)
+        formula = equation(tag, attrs)
+        if formula:
+            self.styles.append(["math", formula[0], formula[1], self.visible_offset])
+            self.handle_data("$" + formula[1] + "$")
+            return
         if tag in ("ul", "ol"):
             self.lists.append(tag)
         elif tag == "li":
@@ -114,9 +181,11 @@ def format_structure(html):
     return json.dumps({"version": 2, "blocks": parser.events, "styles": parser.styles}, ensure_ascii=False)
 
 
-def prepare(nodes):
+def prepare(nodes, first_published_at=None):
     """Blank Rems are paragraph separators; real Rems are list items; LF stays LF."""
     md = MarkdownIt("commonmark", {"html": False, "breaks": True})
+    md.inline.ruler.before("escape", "zhihu_math", math_inline)
+    md.renderer.rules["zhihu_math"] = render_math
     root_text = nodes[0]["text"]
     if "\n" in root_text or "\r" in root_text:
         raise ValueError("article_title_multiline")
@@ -180,4 +249,11 @@ def prepare(nodes):
     text = normalize(html)
     if not 9 <= len(text) <= 100000:
         raise ValueError("article_body_length")
+    if first_published_at is not None:
+        if first_published_at != "待发布" and not re.fullmatch(r"\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}", first_published_at):
+            raise ValueError("article_publication_time_invalid")
+        html += '<p class="ztext-empty-paragraph"><br/></p><p>首次发布时间：' + first_published_at + '</p>'
+        text = normalize(html)
+        if len(text) > 100000:
+            raise ValueError("article_body_length")
     return {"title": title, "html": html, "text": text, "format": format_structure(html)}

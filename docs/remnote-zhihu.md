@@ -1,6 +1,6 @@
 # RemNote 知乎文章定时发布
 
-将配置指定的 RemNote Document 中行首单个 `%` 标记的节点及其完整物理子树发布为一篇知乎文章。标记节点自身的可见文字作为文章标题，其下完整物理子树作为正文。用固定 Rem ID 绑定真实 Document，同一 Document 改名不改变发布范围，也不匹配同名普通节点。按文档深度优先顺序处理，不附带父项或兄弟项，不摘要、改写或添加话题。`%%` 暂停整棵子树；父子同时标记时保留原位并报告冲突。「已发布」子树完全排除。
+将配置指定的 RemNote Document 直属第一层母节点中行首单个 `%` 标记的节点及其完整物理子树发布为一篇知乎文章。标记母节点自身的可见文字作为文章标题，其下完整物理子树作为正文。用固定 Rem ID 绑定真实 Document，同一 Document 改名不改变发布范围，也不匹配同名普通节点。按直属母节点顺序处理，不进入未标记母节点内部查找 `%`，正文中以 `%` 开头的节点保留为正文，不作为独立稿件。不附带父项或兄弟项，不摘要、改写或添加话题。母节点 `%%` 暂停该稿件；「已发布」子树完全排除。
 
 配置 `publishedTagRemId` 后，同一次扫描还会按该 Document 的精确 Rem ID 查询直接使用它作 tag 的节点。外部母节点必须同时具有这个 tag 和行首单个 `%`；只有 tag 时保留为待写内容，只有 `%` 时不扩展到无关位置。母节点自身作为标题，完整物理子树作为正文；支持其他 Document 内及知识库根级的位置。按原 Document 内容优先、外部节点 ID 稳定排序并入同一队列，共享原时段、锁和去重回执。Document 内的同一节点即使也带 tag，仍只按原 Document 流程处理一次；嵌套就绪来源、截断的 tag 搜索及异常分页会被拦截。
 
@@ -18,7 +18,13 @@
 
 文章保留多行文字、Markdown 强调、链接和真实嵌套列表。空叶节点在正文内容组之间转为空段落分隔，不生成空项目符号；同级内容组首尾的空编辑占位不输出，内部连续空节点保留各自间隔。节点内单换行转为 `<br>`，连续换行保留相应行距，不能依赖 HTML 中会折叠的普通换行。带子树的空容器保留子树层级但不生成空项目符号。回读按可见列表深度、空段落位置、节点内换行及强调/链接所在文字位置核验，允许知乎将子列表移到父 `li` 外侧和将 `strong` 转为 `b`，不把等效 DOM 变化误判为内容变化；原始 HTML 作为文字转义，不允许脚本执行。Rem 内部引用只输出可见文字，不跟随读取引用目标。媒体、portal、未解析引用和重叠标记保留原位并报告，不以漏内容的版本发布。标题必填、禁止换行、最多 100 字；正文必填、9～100,000 字。超限时停止，不自动删减、补写或拆分。相同标题与可见正文的重复来源也会被拦截。
 
-正文保留原稿内部的分段空行，末尾不再追加额外空行。
+正文保留原稿内部的分段空行；正文结束后固定追加一个空段落，下一段为 `首次发布时间：YYYY.MM.DD HH:mm`，采用上海时区首次发布提交时刻。时间与提交回执一同落盘，后续只读核验、归档恢复不刷新该时间；旧已归档文章不自动改写。审核草稿使用 `首次发布时间：待发布`，认可后正式提交时替换为实际时间。去重只比较源正文，不受尾注时间变化影响。
+
+RemNote 的 `$...$` 行内公式及 `$$...$$` 公式转换为知乎原生 equation 图片，LaTeX 原文经 URL 编码放入知乎公式地址，并保留于 `alt`；转义美元符号、行内代码及代码块保持文字。回读把公式模式、LaTeX 与出现位置纳入布局对照，不能因图片没有文本节点而漏检公式；超链接保留原目标地址。
+
+文章读取启用本地 MCP 的 `renderNativeMarkdown`，保留原生公式定界符和文字标记；普通纯文本读取可能只给出 LaTeX 内容，不能用于文章转换。草稿核验优先读取实际持久化的 `/draft`，不把另一接口返回的未清洗内容当作编辑器最终输入。知乎会清空公式图片的 `src`，但保留 `eeimg` 与 `alt` 并在编辑器中构建 MathJax 公式；对照必须比较这些原生公式数据。编辑器最多显示五层列表，含更深正文的来源允许存草稿供审核，正式发布前停止，禁止静默压平后发布。
+
+显式 `draft ... --new-version` 会保留已知旧云端草稿，另存新稿，并将旧记录移入本机 `previousDrafts`；普通重试仍复用同一 ID。未知的创建结果始终禁止重建，正在创建的已知 ID 即使带此参数也先恢复原记录，不再创建副本。
 
 ## 客户端与凭据
 
@@ -56,6 +62,7 @@ node dist/workflows/remnote-zhihu-cli.js check <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js scan <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js preview <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js draft <absolute-config.json> <source-rem-id>
+node dist/workflows/remnote-zhihu-cli.js draft <absolute-config.json> <source-rem-id> --new-version
 node dist/workflows/remnote-zhihu-cli.js approve-draft <absolute-config.json> <source-rem-id>
 node dist/workflows/remnote-zhihu-cli.js run <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js adopt <absolute-config.json> <source-rem-id> <published-article-id>

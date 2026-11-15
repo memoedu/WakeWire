@@ -42,6 +42,7 @@ it("runs the external tag workflow through a real MCP HTTP transport without mov
         value = { connected: true, acceptWriteOperations: true };
         break;
       case "remnote_read_note":
+        expect(args.renderNativeMarkdown).toBe(true);
         value = { ...nodes.get(String(args.remId)) };
         break;
       case "remnote_list_children":
