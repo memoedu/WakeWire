@@ -640,6 +640,7 @@ export async function runArticles(options: {
   save: () => void;
   now: Date;
   currentTime?: () => Date;
+  manualSourceRemId?: string;
   seriesStartDate?: string;
   publishedTagRemId?: string;
   aiGeneratedTagRemId?: string;
@@ -688,7 +689,17 @@ export async function runArticles(options: {
       archived += adopted.archived;
     }
   }
-  const slot = publicationSlot(options.now);
+  const manual = options.manualSourceRemId;
+  if (
+    manual &&
+    !state.drafts?.some(
+      (draft) => draft.source.remId === manual && draft.status === "ready" && draft.draftId,
+    )
+  )
+    throw new Error("manual publication requires the exact approved cloud draft");
+  const slot = manual
+    ? `manual:${manual}:${options.now.toISOString()}`
+    : publicationSlot(options.now);
   if (!slot) return { status: "outside-window", published: 0, archived, blocked: 0 };
   if (state.receipts.some((r) => r.slot === slot))
     return { status: "slot-consumed", published: 0, archived, blocked: 0 };
@@ -704,7 +715,9 @@ export async function runArticles(options: {
       .filter((draft) => ["creating", "review"].includes(draft.status))
       .map((draft) => draft.source.remId),
   );
-  const source = scan.sources.find((s) => !completed.has(s.remId) && !held.has(s.remId));
+  const source = scan.sources.find(
+    (s) => !completed.has(s.remId) && !held.has(s.remId) && (!manual || s.remId === manual),
+  );
   if (!source)
     return {
       status: scan.blocked.length ? "blocked" : held.size ? "draft-review" : "empty",
@@ -767,7 +780,7 @@ export async function runArticles(options: {
       hasTag(fresh.nodes[0] as ArticleNode, source.tagTrigger.publishedTagRemId))
   )
     throw new Error("source trigger changed before publication");
-  if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
+  if (!manual && publicationSlot(options.currentTime?.() ?? options.now) !== slot)
     return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   if (options.seriesStartDate) {
     if (!publisher.seriesStats) throw new Error("series listing is unavailable");
@@ -778,7 +791,7 @@ export async function runArticles(options: {
       await publisher.seriesStats(),
       state,
     );
-    if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
+    if (!manual && publicationSlot(options.currentTime?.() ?? options.now) !== slot)
       return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   }
   const bodyText = prepared.text;
@@ -797,7 +810,7 @@ export async function runArticles(options: {
   prepared.html = stamped.html;
   prepared.text = stamped.text;
   prepared.format = stamped.format;
-  if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
+  if (!manual && publicationSlot(options.currentTime?.() ?? options.now) !== slot)
     return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   const receipt: ArticleReceipt = {
     source,

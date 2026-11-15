@@ -843,6 +843,40 @@ describe("RemNote to Zhihu publishing", () => {
     expect(f.state.drafts[0]?.status).toBe("published");
     expect(f.nodes.get("one")?.parentRemId).toBe("published");
   });
+  it("publishes only the exact approved draft on an explicit manual run outside the schedule", async () => {
+    const f = fixture();
+    const source = await snapshotArticle(f.remnote, "two");
+    const prepared = await f.publisher.prepare(source.nodes);
+    f.state.drafts = [{ source, ...prepared, status: "review", draftId: "777" }];
+    f.publisher.readDraft = async () => ({
+      ...prepared,
+      id: "777",
+      authorId: "account",
+      state: "draft",
+      editorUrl: "https://zhuanlan.zhihu.com/p/777/edit",
+    });
+    let posts = 0;
+    f.publisher.publish = async (_title, _html, draft) => {
+      posts++;
+      expect(draft?.draftId).toBe("777");
+      return { id: "777" };
+    };
+    const options = {
+      ...f.options,
+      now: new Date("2026-11-14T10:05:00Z"),
+      manualSourceRemId: "two",
+    };
+    await expect(runArticles(options)).rejects.toThrow("exact approved");
+    expect(posts).toBe(0);
+    const reviewed = f.state.drafts[0];
+    if (!reviewed) throw new Error("missing fixture draft");
+    reviewed.status = "ready";
+    expect(await runArticles(options)).toMatchObject({ published: 1, archived: 1 });
+    expect(posts).toBe(1);
+    expect(f.state.receipts[0]?.slot).toMatch(/^manual:two:/u);
+    expect(f.nodes.get("one")?.title).toBe("%first");
+    expect(f.nodes.get("two")?.parentRemId).toBe("published");
+  });
   it("preserves cloud edits made after draft approval", async () => {
     const f = fixture();
     const source = await snapshotArticle(f.remnote, "one");

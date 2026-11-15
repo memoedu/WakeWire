@@ -69,6 +69,7 @@ node dist/workflows/remnote-zhihu-cli.js preview <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js draft <absolute-config.json> <source-rem-id>
 node dist/workflows/remnote-zhihu-cli.js draft <absolute-config.json> <source-rem-id> --new-version
 node dist/workflows/remnote-zhihu-cli.js approve-draft <absolute-config.json> <source-rem-id>
+node dist/workflows/remnote-zhihu-cli.js publish-now <absolute-config.json> <source-rem-id>
 node dist/workflows/remnote-zhihu-cli.js run <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js adopt <absolute-config.json> <source-rem-id> <published-article-id>
 pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <absolute-config.json>
@@ -85,6 +86,8 @@ pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <ab
 任务以当前登录用户的 Limited 权限隐藏运行，禁止重叠实例，保留实际 Node 子流程的退出码。失败最多间隔 5 分钟重试两次；CLI 的窗口限制和已落盘回执仍约束每次重试，不会再次提交未知结果。注册任务不会立即执行发布。需 Windows 用户已登录、RemNote MCP 在线及现有 Chrome 登录态同步可用；不依赖 ChatGPT 桌面端中的 Codex 保持开启。暂停时停用该 Windows 计划任务，保留本机回执。恢复连接沿用已有 RemNote MCP 启动入口，不重启 RemNote 或用户正在使用的应用。不得通过删除未知结果记录、临时另发、扩大到其他 Document 或补发错过时段绕过限制。
 
 ## 验证
+
+用户明确要求立即发布已经审核的草稿时，可使用 `publish-now` 指定唯一来源。它要求该来源已有状态为 `ready` 的已知云端草稿，复用原锁、提交围栏、账号和内容核验及归档，不选择其他稿件。此操作不受日常窗口限制，记录独立手动时段；普通 `run` 仍受原窗口约束。
 
 ```powershell
 npm run typecheck

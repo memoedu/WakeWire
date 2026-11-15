@@ -305,12 +305,14 @@ async function main(): Promise<void> {
   const [action, configFile, sourceRemId, articleId] = process.argv.slice(2);
   if (
     !action ||
-    !["check", "scan", "preview", "run", "adopt", "draft", "approve-draft"].includes(action) ||
+    !["check", "scan", "preview", "run", "publish-now", "adopt", "draft", "approve-draft"].includes(
+      action,
+    ) ||
     !configFile ||
     !path.isAbsolute(configFile)
   )
     throw new Error(
-      "usage: remnote-zhihu-cli.js check|scan|preview|run|adopt|draft|approve-draft <absolute-config.json> [sourceRemId articleId]",
+      "usage: remnote-zhihu-cli.js check|scan|preview|run|publish-now|adopt|draft|approve-draft <absolute-config.json> [sourceRemId articleId]",
     );
   const config = Config.parse(JSON.parse(fs.readFileSync(configFile, "utf8")));
   for (const target of [config.python, config.cookieSnapshot])
@@ -318,14 +320,16 @@ async function main(): Promise<void> {
   if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(config.mcpUrl).hostname))
     throw new Error("RemNote endpoint must be loopback");
   const home = path.dirname(configFile);
-  const release = ["run", "adopt", "draft", "approve-draft"].includes(action)
+  if (action === "publish-now" && !sourceRemId)
+    throw new Error("publish-now requires an exact approved source");
+  const release = ["run", "publish-now", "adopt", "draft", "approve-draft"].includes(action)
     ? lock(path.join(home, "run.lock"))
     : () => {};
   const remnote = new ArticleRemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);
     const publisher = new ZhihuPublisher(config);
-    if (["run", "adopt", "draft", "approve-draft"].includes(action)) {
+    if (["run", "publish-now", "adopt", "draft", "approve-draft"].includes(action)) {
       const stateFile = path.join(home, "state.json");
       const state = readState(stateFile);
       const shared = {
@@ -390,6 +394,7 @@ async function main(): Promise<void> {
         ...shared,
         now: new Date(),
         currentTime: () => new Date(),
+        ...(action === "publish-now" ? { manualSourceRemId: sourceRemId as string } : {}),
         ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
       });
       const finishedAt = new Date().toISOString();
@@ -442,7 +447,7 @@ async function main(): Promise<void> {
     }
     console.log(JSON.stringify(result));
   } catch (error) {
-    if (action === "run") {
+    if (action === "run" || action === "publish-now") {
       const finishedAt = new Date().toISOString();
       const message = error instanceof Error ? error.message : "";
       const reason = /^remnote_|^RemNote bridge/u.test(message)
