@@ -31,8 +31,8 @@ def validate_links(html):
             raise ValueError("article_link_unsupported")
 
 
-def prepare(nodes, first_published_at=None):
-    result = prepare_layout(nodes, first_published_at)
+def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
+    result = prepare_layout(nodes, first_published_at, ai_generated_tag_rem_id)
     validate_links(result["html"])
     return result
 
@@ -231,7 +231,7 @@ def publish_in_column(client, title, html, column_id):
 def main(request):
     action = request["action"]
     if action == "prepare":
-        result = prepare(request["nodes"], request.get("firstPublishedAt"))
+        result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"))
         validate_links(result["html"])
         return result
     with load_client(request["snapshotPath"]) as client:

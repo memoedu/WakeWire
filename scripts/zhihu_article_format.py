@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from urllib.parse import quote, parse_qs, urlparse
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 
 def compact(text):
@@ -181,7 +182,7 @@ def format_structure(html):
     return json.dumps({"version": 2, "blocks": parser.events, "styles": parser.styles}, ensure_ascii=False)
 
 
-def prepare(nodes, first_published_at=None):
+def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
     """Blank Rems are paragraph separators; real Rems are list items; LF stays LF."""
     md = MarkdownIt("commonmark", {"html": False, "breaks": True})
     md.inline.ruler.before("escape", "zhihu_math", math_inline)
@@ -194,22 +195,35 @@ def prepare(nodes, first_published_at=None):
     title = "".join(parser.parts)
     if not title.strip() or len(title) > 100:
         raise ValueError("article_title_length")
-    root = {"text": root_text, "children": []}
+    def tagged(node):
+        return bool(ai_generated_tag_rem_id) and any(tag.get("tagRemId") == ai_generated_tag_rem_id for tag in node.get("tags", []))
+
+    root = {"text": root_text, "children": [], "ai": tagged(nodes[0])}
     stack = [root]
     for node in nodes[1:]:
         depth = node["depth"]
         if not 1 <= depth <= len(stack):
             raise ValueError("article_outline_depth")
         del stack[depth:]
-        current = {"text": node["text"], "children": []}
+        ai = tagged(node)
+        current = {"text": node["text"], "children": [], "ai": ai or stack[-1]["ai"], "ai_start": ai and not stack[-1]["ai"]}
         stack[-1]["children"].append(current)
         stack.append(current)
 
-    def inline_or_blocks(text):
+    def inline_or_blocks(text, ai=False):
         tokens = md.parse(text)
         if all(token.type in ("paragraph_open", "inline", "paragraph_close") for token in tokens):
-            return md.renderInline(text)
-        return md.render(text)
+            html = md.renderInline(text)
+            return "<em>" + html + "</em>" if ai else html
+        if ai:
+            for token in tokens:
+                if token.type == "inline":
+                    token.children = [Token("em_open", "em", 1), *(token.children or []), Token("em_close", "em", -1)]
+        return md.renderer.render(tokens, md.options, {})
+
+    def ai_badge():
+        # A short native formula marks the range; prose remains editable text.
+        return md.renderInline(r"$\color{#7040a0}{\text{AI}}$") + " "
 
     def render_level(children):
         def visible(node):
@@ -233,6 +247,8 @@ def prepare(nodes, first_published_at=None):
                 flush()
                 if node["children"]:
                     # Preserve a blank structural container's depth, with no phantom bullet.
+                    if node["ai_start"]:
+                        result.append("<p>" + ai_badge() + "</p>")
                     result.append("<ul>" + render_level(node["children"]) + "</ul>")
                 else:
                     result.append('<p class="ztext-empty-paragraph"><br/></p>')
@@ -241,11 +257,12 @@ def prepare(nodes, first_published_at=None):
             # closing parent <li> around a child list. Its native serializer
             # places the child <ul> after the closed <li>, at the same level.
             # Emit that representation so a hierarchy return is not a blank Rem.
-            items.append("<li>" + inline_or_blocks(node["text"]) + "</li>" + render_level(node["children"]))
+            badge = ai_badge() if node["ai_start"] else ""
+            items.append("<li>" + badge + inline_or_blocks(node["text"], node["ai"]) + "</li>" + render_level(node["children"]))
         flush()
         return "".join(result)
 
-    html = render_level(root["children"])
+    html = ("<p>" + ai_badge() + "</p>" if root["ai"] else "") + render_level(root["children"])
     text = normalize(html)
     if not 9 <= len(text) <= 100000:
         raise ValueError("article_body_length")

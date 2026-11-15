@@ -16,6 +16,33 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_ai_ranges_have_one_parent_badge_and_inherited_italics(self):
+        ai = [{"tagRemId": "ai-native", "name": "AI Generated"}]
+        result = adapter.prepare([
+            {"text": "Independent AI example", "depth": 0},
+            {"text": "Human introduction", "depth": 1},
+            {"text": "**Generated parent**", "depth": 1, "tags": ai},
+            {"text": "Child [reference](https://example.com/)", "depth": 2},
+            {"text": "Nested tagged grandchild $x^2$", "depth": 3, "tags": ai},
+            {"text": "Human closing", "depth": 1},
+        ], "待发布", "ai-native")
+        html = result["html"]
+        self.assertEqual(html.count('alt="\\color{#7040a0}{\\text{AI}}"'), 1)
+        self.assertIn('<em><strong>Generated parent</strong></em>', html)
+        self.assertIn('<em>Child <a href="https://example.com/">reference</a></em>', html)
+        self.assertIn('<li>Human closing</li>', html)
+        self.assertIn('<p>首次发布时间：待发布</p>', html)
+        self.assertEqual(sum(s[0] == "math" for s in json.loads(result["format"])["styles"]), 2)
+
+    def test_ai_binding_is_by_exact_tag_id_and_root_range_is_labeled_once(self):
+        nodes = [{"text": "Whole article", "depth": 0, "tags": [{"tagRemId": "ai-root", "name": "renamed tag"}]},
+                 {"text": "Whole article generated body", "depth": 1},
+                 {"text": "Nested generated detail", "depth": 2, "tags": [{"tagRemId": "ai-root", "name": "renamed tag"}]}]
+        result = adapter.prepare(nodes, None, "ai-root")
+        self.assertEqual(result["html"].count('alt="\\color{#7040a0}{\\text{AI}}"'), 1)
+        self.assertIn('<em>Nested generated detail</em>', result["html"])
+        self.assertNotIn('eeimg=', adapter.prepare(nodes, None, "different-id")["html"])
+
     def test_native_math_keeps_latex_links_and_linebreaks(self):
         latex = r'\frac{x_1}{2} + \text{A & B}'
         result = adapter.prepare([

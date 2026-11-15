@@ -33,6 +33,7 @@ export interface ArticleSource {
   parentRemId: string;
   fingerprint: string;
   nodes: ArticleNode[];
+  aiGeneratedTagRemId?: string;
   tagTrigger?: { triggerTagRemId: string; publishedTagRemId: string };
 }
 export interface ArticleReceipt {
@@ -87,6 +88,7 @@ export async function saveReviewDraft(options: {
   now: Date;
   sourceRemId?: string;
   publishedTagRemId?: string;
+  aiGeneratedTagRemId?: string;
   newVersion?: boolean;
 }): Promise<{
   status: string;
@@ -104,7 +106,12 @@ export async function saveReviewDraft(options: {
     !publisher.writeDraft
   )
     throw new Error("cloud draft capabilities are unavailable");
-  const scan = await scanArticles(remnote, options.documentRemId, options.publishedTagRemId);
+  const scan = await scanArticles(
+    remnote,
+    options.documentRemId,
+    options.publishedTagRemId,
+    options.aiGeneratedTagRemId,
+  );
   const source = scan.sources.find(
     (candidate) =>
       !state.receipts.some((receipt) => receipt.source.remId === candidate.remId) &&
@@ -281,7 +288,7 @@ function visible(node: RemNode, root: boolean): string {
   return value;
 }
 
-function fingerprint(nodes: ArticleNode[]): string {
+function fingerprint(nodes: ArticleNode[], aiGeneratedTagRemId?: string): string {
   // Placement of the root changes during archive; content and all descendant identities do not.
   return crypto
     .createHash("sha256")
@@ -294,6 +301,7 @@ function fingerprint(nodes: ArticleNode[]): string {
           n.depth,
           n.inlineRefs ?? [],
           n.media ?? [],
+          ...(aiGeneratedTagRemId ? [hasTag(n, aiGeneratedTagRemId)] : []),
         ]),
       ),
     )
@@ -304,6 +312,7 @@ export async function snapshotArticle(
   remnote: ArticleReader,
   remId: string,
   allowRoot = false,
+  aiGeneratedTagRemId?: string,
 ): Promise<ArticleSource> {
   const nodes: ArticleNode[] = [];
   const seen = new Set<string>();
@@ -324,7 +333,13 @@ export async function snapshotArticle(
   await visit(remId, 0);
   const root = nodes[0];
   if (!root || (!root.parentRemId && !allowRoot)) throw new Error("article root parent is missing");
-  return { remId, parentRemId: root.parentRemId ?? "", fingerprint: fingerprint(nodes), nodes };
+  return {
+    remId,
+    parentRemId: root.parentRemId ?? "",
+    fingerprint: fingerprint(nodes, aiGeneratedTagRemId),
+    nodes,
+    ...(aiGeneratedTagRemId ? { aiGeneratedTagRemId } : {}),
+  };
 }
 
 function hasTag(node: ArticleRem, tagRemId: string): boolean {
@@ -335,7 +350,12 @@ async function sourceSnapshot(
   remnote: ArticleReader,
   source: ArticleSource,
 ): Promise<ArticleSource> {
-  return snapshotArticle(remnote, source.remId, Boolean(source.tagTrigger));
+  return snapshotArticle(
+    remnote,
+    source.remId,
+    Boolean(source.tagTrigger),
+    source.aiGeneratedTagRemId,
+  );
 }
 
 async function validatePublishedTag(
@@ -352,6 +372,7 @@ export async function scanArticles(
   remnote: ArticleReader,
   documentRemId: string,
   publishedTagRemId?: string,
+  aiGeneratedTagRemId?: string,
 ): Promise<{
   sources: ArticleSource[];
   blocked: string[];
@@ -383,7 +404,7 @@ export async function scanArticles(
       }
       if (isMarked(child.title)) {
         try {
-          sources.push(await snapshotArticle(remnote, child.remId));
+          sources.push(await snapshotArticle(remnote, child.remId, false, aiGeneratedTagRemId));
         } catch {
           blocked.push(child.remId);
         }
@@ -454,7 +475,7 @@ export async function scanArticles(
           parent = node.parentRemId;
         }
         if (excluded) continue;
-        const source = await snapshotArticle(remnote, id, true);
+        const source = await snapshotArticle(remnote, id, true, aiGeneratedTagRemId);
         if (source.nodes.some((node) => node.depth > 0 && eligible.has(node.remId)))
           throw new Error("overlapping tag sources");
         const root = source.nodes[0] as ArticleNode;
@@ -583,11 +604,11 @@ export async function archiveArticle(
   // Ensure a lossless marker update is possible before moving the original node.
   const title = displayStartedTitle(losslessTitle(original));
   if (root.parentRemId !== bucketId) await remnote.move(source.remId, bucketId, source.parentRemId);
-  const placed = await snapshotArticle(remnote, source.remId);
+  const placed = await sourceSnapshot(remnote, source);
   if (placed.parentRemId !== bucketId || placed.fingerprint !== source.fingerprint)
     throw new Error("archive placement readback mismatch");
   if (placed.nodes[0]?.title === original.title) await remnote.updateTitle(source.remId, title);
-  const readback = await snapshotArticle(remnote, source.remId);
+  const readback = await sourceSnapshot(remnote, source);
   if (
     readback.parentRemId !== bucketId ||
     readback.nodes[0]?.title !== cleared ||
@@ -608,6 +629,7 @@ export async function runArticles(options: {
   currentTime?: () => Date;
   seriesStartDate?: string;
   publishedTagRemId?: string;
+  aiGeneratedTagRemId?: string;
 }): Promise<{ status: string; published: number; archived: number; blocked: number }> {
   const { remnote, publisher, documentRemId, accountId, state, save } = options;
   // Verify source identity even if this is an archive-only recovery run.
@@ -657,7 +679,12 @@ export async function runArticles(options: {
   if (!slot) return { status: "outside-window", published: 0, archived, blocked: 0 };
   if (state.receipts.some((r) => r.slot === slot))
     return { status: "slot-consumed", published: 0, archived, blocked: 0 };
-  const scan = await scanArticles(remnote, documentRemId, options.publishedTagRemId);
+  const scan = await scanArticles(
+    remnote,
+    documentRemId,
+    options.publishedTagRemId,
+    options.aiGeneratedTagRemId,
+  );
   const completed = new Set(state.receipts.map((r) => r.source.remId));
   const held = new Set(
     (state.drafts ?? [])
@@ -837,6 +864,7 @@ export async function adoptPublishedArticle(options: {
   state: ArticleState;
   save: () => void;
   publishedTagRemId?: string;
+  aiGeneratedTagRemId?: string;
 }): Promise<{ status: string; published: number; archived: number; url: string }> {
   const { remnote, publisher, state, sourceRemId, articleId } = options;
   if (!/^\d+$/u.test(articleId)) throw new Error("invalid published article ID");
@@ -851,7 +879,12 @@ export async function adoptPublishedArticle(options: {
     return { status: "already-adopted", published: 0, archived: 0, url: existing.url as string };
   if (existing)
     throw new Error("source or article already has a receipt; inspect it before adoption");
-  const scan = await scanArticles(remnote, options.documentRemId, options.publishedTagRemId);
+  const scan = await scanArticles(
+    remnote,
+    options.documentRemId,
+    options.publishedTagRemId,
+    options.aiGeneratedTagRemId,
+  );
   const source = scan.sources.find((candidate) => candidate.remId === sourceRemId);
   if (!source)
     throw new Error("manual source is not a pending marked subtree in the bound Document");
