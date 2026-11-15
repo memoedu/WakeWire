@@ -55,6 +55,13 @@ const ArticleRemSchema = z.object({
 
 /** Article-only tag extension; the existing command adapter remains unchanged. */
 export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
+  async richText(remId: string): Promise<Array<Record<string, unknown>>> {
+    const result = z
+      .object({ remId: z.string(), content: z.array(z.record(z.string(), z.unknown())) })
+      .parse(await this.call("personalwebsite_richtext", { remId, preserveReferences: true }));
+    if (result.remId !== remId) throw new Error("native rich text identity changed");
+    return result.content;
+  }
   override async read(remId: string): Promise<ArticleRem> {
     return ArticleRemSchema.parse(
       await this.call("remnote_read_note", {
@@ -155,7 +162,13 @@ export class ZhihuPublisher implements ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
     firstPublishedAt?: string,
-  ): Promise<{ title: string; html: string; text: string; format: string }> {
+  ): Promise<{
+    title: string;
+    html: string;
+    text: string;
+    format: string;
+    hierarchyMode?: string;
+  }> {
     return this.call("prepare", {
       nodes,
       ...(firstPublishedAt ? { firstPublishedAt } : {}),

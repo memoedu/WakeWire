@@ -13,6 +13,7 @@ export interface ArticleRem extends RemNode {
 }
 export interface ArticleReader extends RemNoteReader {
   read(remId: string): Promise<ArticleRem>;
+  richText?(remId: string): Promise<Array<Record<string, unknown>>>;
   tagged?(
     tagRemId: string,
     cursor?: string,
@@ -27,6 +28,7 @@ export interface ArticleReader extends RemNoteReader {
 export interface ArticleNode extends ArticleRem {
   depth: number;
   text: string;
+  richText?: Array<Record<string, unknown>>;
 }
 export interface ArticleSource {
   remId: string;
@@ -34,6 +36,7 @@ export interface ArticleSource {
   fingerprint: string;
   nodes: ArticleNode[];
   aiGeneratedTagRemId?: string;
+  nativeRichText?: boolean;
   tagTrigger?: { triggerTagRemId: string; publishedTagRemId: string };
 }
 export interface ArticleReceipt {
@@ -223,7 +226,7 @@ export interface ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
     firstPublishedAt?: string,
-  ): Promise<{ title: string; html: string; text: string; format: string }>;
+  ): Promise<{ title: string; html: string; text: string; format: string; hierarchyMode?: string }>;
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }>;
   publish(title: string, html: string, draft?: ArticleDraft): Promise<{ id: string }>;
   seriesStats?(): Promise<SeriesStats>;
@@ -302,6 +305,7 @@ function fingerprint(nodes: ArticleNode[], aiGeneratedTagRemId?: string): string
           n.inlineRefs ?? [],
           n.media ?? [],
           ...(aiGeneratedTagRemId ? [hasTag(n, aiGeneratedTagRemId)] : []),
+          ...(n.richText && index > 0 ? [n.richText] : []),
         ]),
       ),
     )
@@ -313,6 +317,7 @@ export async function snapshotArticle(
   remId: string,
   allowRoot = false,
   aiGeneratedTagRemId?: string,
+  nativeRichText = Boolean(remnote.richText),
 ): Promise<ArticleSource> {
   const nodes: ArticleNode[] = [];
   const seen = new Set<string>();
@@ -324,7 +329,13 @@ export async function snapshotArticle(
     if (parent && node.parentRemId !== parent) throw new Error("article subtree moved during scan");
     if (node.remType === "portal" || node.media?.length || /!\[|<img\b|<video\b/iu.test(node.title))
       throw new Error("article contains media or portal; manual handling required");
-    nodes.push({ ...node, depth, text: visible(node, depth === 0) });
+    const richText = nativeRichText && remnote.richText ? await remnote.richText(id) : undefined;
+    nodes.push({
+      ...node,
+      depth,
+      text: visible(node, depth === 0),
+      ...(richText ? { richText } : {}),
+    });
     for (const child of await allChildren(remnote, id)) {
       if (child.parentRemId !== id) throw new Error("nonphysical child in article subtree");
       await visit(child.remId, depth + 1, id);
@@ -339,6 +350,7 @@ export async function snapshotArticle(
     fingerprint: fingerprint(nodes, aiGeneratedTagRemId),
     nodes,
     ...(aiGeneratedTagRemId ? { aiGeneratedTagRemId } : {}),
+    ...(nativeRichText ? { nativeRichText: true } : {}),
   };
 }
 
@@ -355,6 +367,7 @@ async function sourceSnapshot(
     source.remId,
     Boolean(source.tagTrigger),
     source.aiGeneratedTagRemId,
+    Boolean(source.nativeRichText),
   );
 }
 
@@ -700,9 +713,12 @@ export async function runArticles(options: {
       blocked: scan.blocked.length,
     };
   losslessTitle(source.nodes[0] as ArticleNode);
-  if (source.nodes.some((node) => node.depth > 5 && node.text.trim()))
-    throw new Error("Zhihu supports at most five list levels; source hierarchy requires review");
   const prepared = await publisher.prepare(source.nodes);
+  const maxDepth = Math.max(
+    ...source.nodes.filter((node) => node.text.trim()).map((node) => node.depth),
+  );
+  if (maxDepth > 5 && (maxDepth > 6 || prepared.hierarchyMode !== "section-headings"))
+    throw new Error("Zhihu supports at most five list levels; source hierarchy requires review");
   const savedDraft = state.drafts?.find(
     (draft) => draft.source.remId === source.remId && draft.status === "ready",
   );

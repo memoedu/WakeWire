@@ -7,7 +7,6 @@ from html.parser import HTMLParser
 from urllib.parse import quote, parse_qs, urlparse
 
 from markdown_it import MarkdownIt
-from markdown_it.token import Token
 
 
 def compact(text):
@@ -79,8 +78,70 @@ def math_inline(state, silent):
 
 def render_math(tokens, idx, options, env):
     token = tokens[idx]
-    return ('<img eeimg="' + token.meta["mode"] + '" src="//www.zhihu.com/equation?tex='
-            + quote(token.content, safe="") + '" alt="' + escape(token.content, quote=True) + '"/>')
+    return equation_html(token.content, token.meta["mode"])
+
+
+def equation_html(tex, mode):
+    return ('<img eeimg="' + mode + '" src="//www.zhihu.com/equation?tex='
+            + quote(tex, safe="") + '" alt="' + escape(tex, quote=True) + '"/>')
+
+
+def native_html(runs, refs):
+    result = []
+    for run in runs:
+        if "text" in run:
+            text = run["text"]
+            for ref in refs:
+                text = text.replace("[[" + ref["text"] + "]]", ref["text"])
+            if re.search(r"\[\[[^\]]+\]\]", text):
+                raise ValueError("article_native_reference_unresolved")
+            html = escape(text).replace("\r\n", "\n").replace("\n", "<br/>")
+            for mark, tag in (("code", "code"), ("italic", "em"), ("bold", "strong")):
+                if run.get(mark):
+                    html = "<" + tag + ">" + html + "</" + tag + ">"
+            result.append(html)
+        elif run.get("type") == "math":
+            result.append(equation_html(run["tex"], "2" if run["display"] else "1"))
+        elif run.get("type") == "link":
+            result.append('<a href="' + escape(run["url"], quote=True) + '">' + native_html(run["children"], refs) + '</a>')
+        else:
+            raise ValueError("article_native_element_unsupported")
+    return "".join(result)
+
+
+class LiftGaps(HTMLParser):
+    """Native Draft.js gaps are unstyled blocks, outside every list container."""
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.parts, self.lists, self.in_gap = [], [], False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "p" and "ztext-empty-paragraph" in dict(attrs).get("class", ""):
+            self.parts.extend("</" + item + ">" for item in reversed(self.lists))
+            self.in_gap = True
+        self.parts.append(self.get_starttag_text())
+        if tag in ("ul", "ol"):
+            self.lists.append(tag)
+
+    def handle_endtag(self, tag):
+        self.parts.append("</" + tag + ">")
+        if tag in ("ul", "ol"):
+            self.lists.pop()
+        if tag == "p" and self.in_gap:
+            self.parts.extend("<" + item + ">" for item in self.lists)
+            self.in_gap = False
+
+    def handle_startendtag(self, tag, attrs):
+        self.parts.append(self.get_starttag_text())
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def handle_entityref(self, name):
+        self.parts.append("&" + name + ";")
+
+    def handle_charref(self, name):
+        self.parts.append("&#" + name + ";")
 
 
 def normalize(html):
@@ -117,7 +178,7 @@ class ArticleLayout(HTMLParser):
             item = {"kind": "item", "depth": len(self.lists), "list": self.lists[-1] if self.lists else "none", "text": ""}
             self.events.append(item)
             self.items.append(item)
-        elif tag == "p":
+        elif tag in ("p", "h1", "h2", "h3", "h4", "h5", "h6"):
             self.paragraphs.append({"parts": [], "target": self.items[-1] if self.items else None, "depth": len(self.lists)})
         elif tag == "br":
             if self.paragraphs:
@@ -141,7 +202,7 @@ class ArticleLayout(HTMLParser):
             self.lists.pop()
         elif tag == "li" and self.items:
             self.items.pop()
-        elif tag == "p" and self.paragraphs:
+        elif tag in ("p", "h1", "h2", "h3", "h4", "h5", "h6") and self.paragraphs:
             paragraph = self.paragraphs.pop()
             value = "".join(paragraph["parts"])
             if not value.strip("\n"):
@@ -191,8 +252,10 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
     if "\n" in root_text or "\r" in root_text:
         raise ValueError("article_title_multiline")
     parser = VisibleText()
-    parser.feed(md.renderInline(root_text))
+    parser.feed(native_html(nodes[0]["richText"], nodes[0].get("inlineRefs", [])) if "richText" in nodes[0] else md.renderInline(root_text))
     title = "".join(parser.parts)
+    if "richText" in nodes[0]:
+        title = re.sub(r"^\s*%(?!%)\s?", "", title, count=1)
     if not title.strip() or len(title) > 100:
         raise ValueError("article_title_length")
     def tagged(node):
@@ -206,26 +269,22 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
             raise ValueError("article_outline_depth")
         del stack[depth:]
         ai = tagged(node)
-        current = {"text": node["text"], "children": [], "ai": ai or stack[-1]["ai"], "ai_start": ai and not stack[-1]["ai"]}
+        current = {"text": node["text"], "children": [], "ai": ai or stack[-1]["ai"], "ai_start": ai and not stack[-1]["ai"], "native": node.get("richText"), "refs": node.get("inlineRefs", [])}
         stack[-1]["children"].append(current)
         stack.append(current)
 
-    def inline_or_blocks(text, ai=False):
+    def inline_or_blocks(text):
         tokens = md.parse(text)
         if all(token.type in ("paragraph_open", "inline", "paragraph_close") for token in tokens):
             html = md.renderInline(text)
-            return "<em>" + html + "</em>" if ai else html
-        if ai:
-            for token in tokens:
-                if token.type == "inline":
-                    token.children = [Token("em_open", "em", 1), *(token.children or []), Token("em_close", "em", -1)]
+            return html
         return md.renderer.render(tokens, md.options, {})
 
     def ai_badge():
         # A short native formula marks the range; prose remains editable text.
         return md.renderInline(r"$\color{#7040a0}{\text{AI}}$") + " "
 
-    def render_level(children):
+    def render_level(children, headings=False):
         def visible(node):
             return bool(node["text"].strip()) or any(visible(child) for child in node["children"])
 
@@ -249,7 +308,7 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
                     # Preserve a blank structural container's depth, with no phantom bullet.
                     if node["ai_start"]:
                         result.append("<p>" + ai_badge() + "</p>")
-                    result.append("<ul>" + render_level(node["children"]) + "</ul>")
+                    result.append(("" if headings else "<ul>") + render_level(node["children"]) + ("" if headings else "</ul>"))
                 else:
                     result.append('<p class="ztext-empty-paragraph"><br/></p>')
                 continue
@@ -258,11 +317,20 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
             # places the child <ul> after the closed <li>, at the same level.
             # Emit that representation so a hierarchy return is not a blank Rem.
             badge = ai_badge() if node["ai_start"] else ""
-            items.append("<li>" + badge + inline_or_blocks(node["text"], node["ai"]) + "</li>" + render_level(node["children"]))
+            body = native_html(node["native"], node["refs"]) if node["native"] is not None else inline_or_blocks(node["text"])
+            if headings:
+                flush()
+                result.append("<h2>" + badge + body + "</h2>" + render_level(node["children"]))
+            else:
+                items.append("<li>" + badge + body + "</li>" + render_level(node["children"]))
         flush()
         return "".join(result)
 
-    html = ("<p>" + ai_badge() + "</p>" if root["ai"] else "") + render_level(root["children"])
+    headings = max(node["depth"] for node in nodes if node["text"].strip()) > 5
+    html = ("<p>" + ai_badge() + "</p>" if root["ai"] else "") + render_level(root["children"], headings)
+    gaps = LiftGaps()
+    gaps.feed(html)
+    html = "".join(gaps.parts)
     text = normalize(html)
     if not 9 <= len(text) <= 100000:
         raise ValueError("article_body_length")
@@ -273,4 +341,4 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
         text = normalize(html)
         if len(text) > 100000:
             raise ValueError("article_body_length")
-    return {"title": title, "html": html, "text": text, "format": format_structure(html)}
+    return {"title": title, "html": html, "text": text, "format": format_structure(html), "hierarchyMode": "section-headings" if headings else "lists"}
