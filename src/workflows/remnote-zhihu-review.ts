@@ -186,7 +186,12 @@ export function articleFeedback(state: ArticleState, now: Date, phase: string, s
       issues: r.issues,
       ...(r.editorUrl ? { editorUrl: r.editorUrl } : {}),
     }));
-  const generalIssues = state.reviewFailure ? [state.reviewFailure.issue] : [];
+  const generalIssues = [
+    ...(state.reviewFailure ? [state.reviewFailure.issue] : []),
+    ...state.receipts
+      .filter((r) => r.stage !== "archived")
+      .map((r) => `《${r.title}》的既有发布记录尚未完成核验或归档，请先核对；系统不会重复发布。`),
+  ];
   const issues = articles.filter((r) => r.status === "blocked").length + generalIssues.length;
   return {
     updatedAt: now.toISOString(),

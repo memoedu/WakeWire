@@ -240,6 +240,24 @@ describe("RemNote to Zhihu publishing", () => {
     expect(reviewSlot(new Date("2026-11-14T01:45:00Z"))).toBeUndefined();
     expect(nextPublicationSlot(new Date("2026-11-14T15:00:00Z"))).toBe("2026-11-15T11:30+08:00");
   });
+  it("keeps unverified publication recovery visible even when later review runs are empty", () => {
+    const f = fixture();
+    f.state.receipts.push({
+      source: { remId: "old", parentRemId: "doc", fingerprint: "fixture", nodes: [] },
+      slot: "old",
+      title: "Earlier article",
+      html: "<p>body</p>",
+      text: "body",
+      format: "[]",
+      columnId: "col",
+      stage: "submitting",
+    });
+    const feedback = articleFeedback(f.state, f.options.now, "audit");
+    expect(feedback.issues).toBe(1);
+    expect(feedback.generalIssues[0]).toContain("不会重复发布");
+    for (const receipt of f.state.receipts) receipt.stage = "archived";
+    expect(articleFeedback(f.state, f.options.now, "audit").issues).toBe(0);
+  });
   it("audits every eligible article into a verified draft without publishing or moving", async () => {
     const f = reviewFixture();
     expect(await auditArticles(f.audit)).toMatchObject({
