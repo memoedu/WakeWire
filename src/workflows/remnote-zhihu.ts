@@ -43,6 +43,8 @@ export interface ArticleReceipt {
   text: string;
   format: string;
   stage: "submitting" | "published" | "verified" | "archived";
+  bodyText?: string;
+  firstPublishedAt?: string;
   articleId?: string;
   columnId: string;
   url?: string;
@@ -50,6 +52,7 @@ export interface ArticleReceipt {
 export interface ArticleState {
   receipts: ArticleReceipt[];
   drafts?: ArticleDraft[];
+  previousDrafts?: ArticleDraft[];
 }
 export interface CloudDraft {
   id: string;
@@ -84,6 +87,7 @@ export async function saveReviewDraft(options: {
   now: Date;
   sourceRemId?: string;
   publishedTagRemId?: string;
+  newVersion?: boolean;
 }): Promise<{
   status: string;
   id: string;
@@ -107,7 +111,7 @@ export async function saveReviewDraft(options: {
       (!options.sourceRemId || candidate.remId === options.sourceRemId),
   );
   if (!source) throw new Error("no eligible marked source for draft preview");
-  const prepared = await publisher.prepare(source.nodes);
+  const prepared = await publisher.prepare(source.nodes, "待发布");
   prepared.title = seriesTitle(
     prepared.title,
     options.now,
@@ -121,6 +125,21 @@ export async function saveReviewDraft(options: {
   state.drafts ??= [];
   let draft = state.drafts.find((item) => item.source.remId === source.remId);
   let cloud: CloudDraft | undefined;
+  if (draft && options.newVersion && draft.status !== "creating") {
+    if (!draft.draftId)
+      throw new Error("unknown draft creation result; automatic recreation blocked");
+    const previous = await publisher.readDraft(draft.draftId);
+    if (
+      previous.id !== draft.draftId ||
+      previous.authorId !== options.accountId ||
+      previous.state !== "draft"
+    )
+      throw new Error("previous draft identity or state changed");
+    state.previousDrafts ??= [];
+    state.previousDrafts.push(draft);
+    state.drafts = state.drafts.filter((item) => item !== draft);
+    draft = undefined;
+  }
   if (draft) {
     if (!draft.draftId)
       throw new Error("unknown draft creation result; automatic recreation blocked");
@@ -196,6 +215,7 @@ export interface SeriesStats {
 export interface ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
+    firstPublishedAt?: string,
   ): Promise<{ title: string; html: string; text: string; format: string }>;
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }>;
   publish(title: string, html: string, draft?: ArticleDraft): Promise<{ id: string }>;
@@ -295,8 +315,6 @@ export async function snapshotArticle(
     if (parent && node.parentRemId !== parent) throw new Error("article subtree moved during scan");
     if (node.remType === "portal" || node.media?.length || /!\[|<img\b|<video\b/iu.test(node.title))
       throw new Error("article contains media or portal; manual handling required");
-    if (depth && (isMarked(node.title) || /^\s*%%/u.test(node.title)))
-      throw new Error("overlapping markers in article subtree");
     nodes.push({ ...node, depth, text: visible(node, depth === 0) });
     for (const child of await allChildren(remnote, id)) {
       if (child.parentRemId !== id) throw new Error("nonphysical child in article subtree");
@@ -370,7 +388,9 @@ export async function scanArticles(
           blocked.push(child.remId);
         }
         // A marked subtree is one unit, never fall through and publish a nested child.
-      } else await visit(child.remId);
+      }
+      // Only direct children are article roots. A percent inside an unmarked
+      // article/body is source text, never a second publication entry point.
     }
   };
   await visit(documentRemId);
@@ -435,6 +455,8 @@ export async function scanArticles(
         }
         if (excluded) continue;
         const source = await snapshotArticle(remnote, id, true);
+        if (source.nodes.some((node) => node.depth > 0 && eligible.has(node.remId)))
+          throw new Error("overlapping tag sources");
         const root = source.nodes[0] as ArticleNode;
         if (
           !isMarked(root.title) ||
@@ -651,6 +673,8 @@ export async function runArticles(options: {
       blocked: scan.blocked.length,
     };
   losslessTitle(source.nodes[0] as ArticleNode);
+  if (source.nodes.some((node) => node.depth > 5 && node.text.trim()))
+    throw new Error("Zhihu supports at most five list levels; source hierarchy requires review");
   const prepared = await publisher.prepare(source.nodes);
   const savedDraft = state.drafts?.find(
     (draft) => draft.source.remId === source.remId && draft.status === "ready",
@@ -680,7 +704,7 @@ export async function runArticles(options: {
     state.receipts.some(
       (r) =>
         r.title.replace(SERIES_SUFFIX, "") === prepared.title.replace(SERIES_SUFFIX, "") &&
-        r.text === prepared.text,
+        (r.bodyText ?? r.text) === prepared.text,
     )
   )
     throw new Error("duplicate article content; automatic publication blocked");
@@ -714,10 +738,30 @@ export async function runArticles(options: {
     if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
       return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   }
+  const bodyText = prepared.text;
+  const firstPublishedAt = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  })
+    .format(options.currentTime?.() ?? options.now)
+    .replaceAll("-", ".");
+  const stamped = await publisher.prepare(source.nodes, firstPublishedAt);
+  prepared.html = stamped.html;
+  prepared.text = stamped.text;
+  prepared.format = stamped.format;
+  if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
+    return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   const receipt: ArticleReceipt = {
     source,
     slot,
     ...prepared,
+    bodyText,
+    firstPublishedAt,
     columnId: options.columnId,
     stage: "submitting",
     ...(savedDraft?.draftId ? { articleId: savedDraft.draftId } : {}),

@@ -16,6 +16,46 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_native_math_keeps_latex_links_and_linebreaks(self):
+        latex = r'\frac{x_1}{2} + \text{A & B}'
+        result = adapter.prepare([
+            {"text": "Independent formula title", "depth": 0},
+            {"text": f"Inline ${latex}$ and [reference](https://example.com/a?x=1&y=2)\nnext line", "depth": 1},
+            {"text": r"$$\sum_{k=1}^{n} k$$", "depth": 2},
+        ])
+        self.assertIn('eeimg="1"', result["html"])
+        self.assertIn('eeimg="2"', result["html"])
+        self.assertIn('<br', result["html"])
+        layout = json.loads(result["format"])
+        formulas = [s for s in layout["styles"] if s[0] == "math"]
+        self.assertEqual([f[2] for f in formulas], [latex, r'\sum_{k=1}^{n} k'])
+        self.assertEqual([s[1] for s in layout["styles"] if s[0] == "+a"], ["https://example.com/a?x=1&y=2"])
+        self.assertNotEqual(result["format"], adapter.format_structure(re.sub(r'<img[^>]+>', '', result["html"])))
+        self.assertIn(adapter.normalize(f'<p>${latex}$</p>'), result["text"])
+
+    def test_code_and_escaped_dollar_are_not_formulas(self):
+        result = adapter.prepare([{"text": "Code example", "depth": 0},
+                                  {"text": r'Literal \$x\$ and `$x$` plus $y^2$', "depth": 1}])
+        self.assertEqual(result["html"].count('<img '), 1)
+        self.assertIn('<code>$x$</code>', result["html"])
+        with self.assertRaisesRegex(ValueError, "latex_mismatch"):
+            adapter.format_structure('<img eeimg="1" src="https://www.zhihu.com/equation?tex=x" alt="y"/>')
+        native = '<img eeimg="1" src="" alt="x^2"/>'
+        authored = '<img eeimg="1" src="//www.zhihu.com/equation?tex=x%5E2" alt="x^2"/>'
+        self.assertEqual(adapter.format_structure(native), adapter.format_structure(authored))
+        self.assertEqual(adapter.normalize(native), "$x^2$")
+
+    def test_publication_footer_is_one_gap_and_draft_has_no_invented_time(self):
+        nodes = [{"text": "Footer example", "depth": 0}, {"text": "Independent body content", "depth": 1}]
+        for stamp in ("待发布", "2026.11.19 22:30"):
+            result = adapter.prepare(nodes, stamp)
+            blocks = json.loads(result["format"])["blocks"]
+            self.assertEqual(blocks[-2], {"kind": "gap", "depth": 0})
+            self.assertEqual(blocks[-1], {"kind": "paragraph", "depth": 0, "text": "首次发布时间：" + stamp.replace(" ", "")})
+            self.assertEqual(sum(b["kind"] == "gap" for b in blocks), 1)
+        with self.assertRaisesRegex(ValueError, "publication_time_invalid"):
+            adapter.prepare(nodes, "tomorrow")
+
     def snapshot(self, age=0):
         return json.dumps({
             "schema": "local.chrome-cookie-snapshot", "schemaVersion": 1,
@@ -126,9 +166,11 @@ class AdapterTests(unittest.TestCase):
                 data = {"id": "789"}
             elif url.endswith("/articles/789"):
                 data = dict(cloud)
-            elif url.endswith("/draft"):
+            elif url.endswith("/draft") and method.upper() == "PATCH":
                 self.assertEqual(kwargs["json"], {"title": "A title", "content": "<p>Independent body</p>"})
                 cloud.update(kwargs["json"])
+                data = dict(cloud)
+            elif url.endswith("/draft"):
                 data = dict(cloud)
             elif url.endswith("/content/publish"):
                 self.assertEqual(method.upper(), "POST")
@@ -212,12 +254,13 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(methods.count("PATCH"), 1)
         self.assertNotIn("PUT", methods)
 
-    def test_private_draft_is_read_via_draft_route_after_public_route_404(self):
+    def test_persisted_draft_route_precedes_public_fallback(self):
         client = MagicMock()
         client._session.get.return_value.status_code = 404
         client._get.return_value = {"id": "666", "state": "draft", "author": {"id": "me"}, "title": "", "content": ""}
         self.assertEqual(adapter.read_draft(client, "666")["state"], "draft")
-        client._get.assert_called_once_with("https://zhuanlan.zhihu.com/api/articles/666/draft")
+        client._session.get.assert_called_once_with("https://zhuanlan.zhihu.com/api/articles/666/draft", timeout=15)
+        client._get.assert_called_once_with("https://zhuanlan.zhihu.com/api/articles/666")
 
     def test_approved_saved_draft_reuses_identity_and_publishes_in_column(self):
         client = ZhihuClient({})
