@@ -58,6 +58,19 @@ export interface ArticleState {
   receipts: ArticleReceipt[];
   drafts?: ArticleDraft[];
   previousDrafts?: ArticleDraft[];
+  reviews?: ArticleReview[];
+  reviewFailure?: { at: string; issue: string };
+}
+export interface ArticleReview {
+  sourceRemId: string;
+  title: string;
+  slot: string;
+  checkedAt: string;
+  fingerprint?: string;
+  draftId?: string;
+  editorUrl?: string;
+  status: "approved" | "blocked" | "resolved" | "withdrawn";
+  issues: string[];
 }
 export interface CloudDraft {
   id: string;
@@ -79,12 +92,13 @@ export interface ArticleDraft {
   editorUrl?: string;
   cloudBefore?: Pick<CloudDraft, "title" | "text" | "format">;
   mentionBindings?: MentionBinding[];
+  reviewMode?: "automatic";
 }
 export interface MentionBinding {
   name: string;
   id: string;
 }
-function mentionIdentity(bindings?: MentionBinding[]): string {
+export function mentionIdentity(bindings?: MentionBinding[]): string {
   return JSON.stringify((bindings ?? []).map((binding) => [binding.name, binding.id]).sort());
 }
 
@@ -102,6 +116,7 @@ export async function saveReviewDraft(options: {
   publishedTagRemId?: string;
   aiGeneratedTagRemId?: string;
   newVersion?: boolean;
+  reviewMode?: "automatic";
 }): Promise<{
   status: string;
   id: string;
@@ -177,9 +192,19 @@ export async function saveReviewDraft(options: {
         ))
     )
       throw new Error("cloud draft changed; author edits were preserved");
-    Object.assign(draft, prepared, { source, status: "creating", cloudBefore: cloud });
+    Object.assign(draft, prepared, {
+      source,
+      status: "creating",
+      cloudBefore: cloud,
+      ...(options.reviewMode ? { reviewMode: options.reviewMode } : {}),
+    });
   } else {
-    draft = { source, ...prepared, status: "creating" };
+    draft = {
+      source,
+      ...prepared,
+      status: "creating",
+      ...(options.reviewMode ? { reviewMode: options.reviewMode } : {}),
+    };
     state.drafts.push(draft);
   }
   save(); // Fence draft creation so another invocation cannot create a duplicate.
@@ -554,6 +579,54 @@ export function publicationSlot(now: Date): string | undefined {
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:30+08:00`;
 }
 
+export function reviewSlot(now: Date): string | undefined {
+  return publicationSlot(new Date(now.getTime() + 2 * 60 * 60 * 1000));
+}
+
+export function nextPublicationSlot(now: Date): string {
+  const day = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+  for (const hour of ["11", "17", "22"]) {
+    const slot = `${day}T${hour}:30+08:00`;
+    if (Date.parse(slot) > now.getTime()) return slot;
+  }
+  const nextDay = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(Date.parse(`${day}T00:00+08:00`) + 86400000));
+  return `${nextDay}T11:30+08:00`;
+}
+
+export function validateArticle(
+  source: ArticleSource,
+  prepared: { title: string; text: string; hierarchyMode?: string },
+  state: ArticleState,
+): void {
+  const maxDepth = Math.max(
+    ...source.nodes.filter((node) => node.text.trim()).map((node) => node.depth),
+  );
+  if (maxDepth > 5 && (maxDepth > 6 || prepared.hierarchyMode !== "section-headings"))
+    throw new Error("Zhihu supports at most five list levels; source hierarchy requires review");
+  if (!prepared.title.trim() || [...prepared.title].length > 100 || /[\r\n]/u.test(prepared.title))
+    throw new Error("article title must be one line within 100 characters");
+  if (prepared.text.length < 9 || [...prepared.text].length > 100000)
+    throw new Error("article body must contain 9 to 100000 characters");
+  if (
+    state.receipts.some(
+      (r) =>
+        r.title.replace(SERIES_SUFFIX, "") === prepared.title.replace(SERIES_SUFFIX, "") &&
+        (r.bodyText ?? r.text) === prepared.text,
+    )
+  )
+    throw new Error("duplicate article content; automatic publication blocked");
+}
+
 export async function archiveArticle(
   remnote: ArticleReader,
   documentRemId: string,
@@ -660,6 +733,7 @@ export async function runArticles(options: {
   seriesStartDate?: string;
   publishedTagRemId?: string;
   aiGeneratedTagRemId?: string;
+  requirePreflight?: boolean;
 }): Promise<{ status: string; published: number; archived: number; blocked: number }> {
   const { remnote, publisher, documentRemId, accountId, state, save } = options;
   // Verify source identity even if this is an archive-only recovery run.
@@ -731,23 +805,67 @@ export async function runArticles(options: {
       .filter((draft) => ["creating", "review"].includes(draft.status))
       .map((draft) => draft.source.remId),
   );
-  const source = scan.sources.find(
+  const candidates = scan.sources.filter(
     (s) => !completed.has(s.remId) && !held.has(s.remId) && (!manual || s.remId === manual),
+  );
+  if (options.requirePreflight && !manual) {
+    state.reviews ??= [];
+    for (const candidate of candidates) {
+      if (
+        state.reviews.some(
+          (review) =>
+            review.sourceRemId === candidate.remId &&
+            review.slot === slot &&
+            review.status === "approved" &&
+            review.fingerprint === candidate.fingerprint &&
+            state.drafts?.some(
+              (draft) =>
+                draft.source.remId === candidate.remId &&
+                draft.status === "ready" &&
+                draft.draftId === review.draftId,
+            ),
+        )
+      )
+        continue;
+      const existing = state.reviews.find(
+        (review) => review.sourceRemId === candidate.remId && review.slot === slot,
+      );
+      const issue = {
+        sourceRemId: candidate.remId,
+        title: candidate.nodes[0]?.text ?? "待发布文章",
+        slot,
+        checkedAt: options.now.toISOString(),
+        status: "blocked" as const,
+        issues: ["尚无本时段有效审核，或审核后源内容发生变化；保留原稿，等待重新审核。"],
+      };
+      if (existing) Object.assign(existing, issue);
+      else state.reviews.push(issue);
+    }
+    save();
+  }
+  const source = candidates.find(
+    (s) =>
+      !options.requirePreflight ||
+      manual ||
+      state.reviews?.some(
+        (review) =>
+          review.sourceRemId === s.remId &&
+          review.slot === slot &&
+          review.status === "approved" &&
+          review.fingerprint === s.fingerprint,
+      ),
   );
   if (!source)
     return {
-      status: scan.blocked.length ? "blocked" : held.size ? "draft-review" : "empty",
+      status:
+        scan.blocked.length || candidates.length ? "blocked" : held.size ? "draft-review" : "empty",
       published: 0,
       archived,
-      blocked: scan.blocked.length,
+      blocked: scan.blocked.length + candidates.length,
     };
   losslessTitle(source.nodes[0] as ArticleNode);
   const prepared = await publisher.prepare(source.nodes);
-  const maxDepth = Math.max(
-    ...source.nodes.filter((node) => node.text.trim()).map((node) => node.depth),
-  );
-  if (maxDepth > 5 && (maxDepth > 6 || prepared.hierarchyMode !== "section-headings"))
-    throw new Error("Zhihu supports at most five list levels; source hierarchy requires review");
+  validateArticle(source, prepared, state);
   const savedDraft = state.drafts?.find(
     (draft) => draft.source.remId === source.remId && draft.status === "ready",
   );
@@ -770,18 +888,6 @@ export async function runArticles(options: {
     )
       throw new Error("cloud draft changed; preserve author edits before publication");
   }
-  if (!prepared.title.trim() || [...prepared.title].length > 100 || /[\r\n]/u.test(prepared.title))
-    throw new Error("article title must be one line within 100 characters");
-  if (prepared.text.length < 9 || [...prepared.text].length > 100000)
-    throw new Error("article body must contain 9 to 100000 characters");
-  if (
-    state.receipts.some(
-      (r) =>
-        r.title.replace(SERIES_SUFFIX, "") === prepared.title.replace(SERIES_SUFFIX, "") &&
-        (r.bodyText ?? r.text) === prepared.text,
-    )
-  )
-    throw new Error("duplicate article content; automatic publication blocked");
   const account = await publisher.check();
   if (account.id !== accountId) throw new Error("publishing account changed");
   if (account.columnId !== options.columnId) throw new Error("publishing column changed");

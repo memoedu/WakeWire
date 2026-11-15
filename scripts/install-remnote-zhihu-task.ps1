@@ -15,7 +15,7 @@ $arguments = '-NoLogo -NoProfile -WindowStyle Hidden -File "'+$runner+'" -Config
 # Same direct-process pattern as the RemNote command workflow; preserve real exit codes.
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument $arguments -WorkingDirectory (Split-Path $PSScriptRoot -Parent)
 $now = Get-Date
-$triggers = @('11:30', '17:30', '22:30' | ForEach-Object {
+$triggers = @('09:30', '11:30', '15:30', '17:30', '20:30', '22:30' | ForEach-Object {
     $start = $now.Date.Add([TimeSpan]::Parse($_))
     if ($start -le $now) { $start = $start.AddDays(1) }
     New-ScheduledTaskTrigger -Daily -At $start

@@ -9,6 +9,6 @@ foreach ($required in @($Config, $Entry, $Node)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw 'A Zhihu workflow dependency is missing.' }
 }
 $log = Join-Path (Split-Path -Parent $Config) 'scheduler.log'
-& $Node $Entry run $Config 2>&1 | Tee-Object -FilePath $log -Append
+& $Node $Entry tick $Config 2>&1 | Tee-Object -FilePath $log -Append
 $workflowExit = $LASTEXITCODE
 exit $workflowExit

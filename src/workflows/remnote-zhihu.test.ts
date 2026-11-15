@@ -1,18 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RemNode, RemNoteReader } from "./remnote-todo.js";
+import { RemNoteMcp } from "./remnote-todo-cli.js";
 import {
   type ArticlePublisher,
   type ArticleReader,
   type ArticleRem,
   type ArticleState,
   adoptPublishedArticle,
+  nextPublicationSlot,
   publicationSlot,
+  reviewSlot,
   runArticles,
   saveReviewDraft,
   scanArticles,
   seriesTitle,
   snapshotArticle,
 } from "./remnote-zhihu.js";
+import { ArticleRemNoteMcp } from "./remnote-zhihu-cli.js";
+import { articleFeedback, auditArticles } from "./remnote-zhihu-review.js";
 
 function fixture() {
   const nodes = new Map<string, RemNode>([
@@ -153,6 +158,177 @@ function taggedFixture() {
 }
 
 describe("RemNote to Zhihu publishing", () => {
+  it("checks the configured knowledge base before accessing any source notes", async () => {
+    const connect = vi.spyOn(RemNoteMcp.prototype, "connect").mockResolvedValue();
+    const calls: string[] = [];
+    class Probe extends ArticleRemNoteMcp {
+      protected override async call(name: string): Promise<unknown> {
+        calls.push(name);
+        return { knowledgeBaseId: "expected-library" };
+      }
+    }
+    try {
+      await expect(
+        new Probe().connect("http://127.0.0.1:1/mcp", "foreign-library"),
+      ).rejects.toThrow("knowledge base changed");
+      await expect(
+        new Probe().connect("http://127.0.0.1:1/mcp", "expected-library"),
+      ).resolves.toBeUndefined();
+      expect(calls).toEqual(["remnote_status", "remnote_status"]);
+    } finally {
+      connect.mockRestore();
+    }
+  });
+  function reviewFixture() {
+    const f = fixture();
+    const cloud = new Map<
+      string,
+      {
+        id: string;
+        title: string;
+        text: string;
+        format: string;
+        authorId: string;
+        state: string;
+        editorUrl: string;
+      }
+    >();
+    let creations = 0;
+    f.publisher.seriesStats = async () => ({ publishedCount: 0, maxOrdinal: 0 });
+    f.publisher.createDraft = async () => {
+      const id = String(700 + ++creations);
+      cloud.set(id, {
+        id,
+        title: "",
+        text: "",
+        format: "[]",
+        authorId: "account",
+        state: "draft",
+        editorUrl: `https://zhuanlan.zhihu.com/p/${id}/edit`,
+      });
+      return { id };
+    };
+    f.publisher.readDraft = async (id) =>
+      structuredClone(cloud.get(id) as NonNullable<ReturnType<typeof cloud.get>>);
+    f.publisher.writeDraft = async (id, title, html) => {
+      const saved = {
+        ...(cloud.get(id) as NonNullable<ReturnType<typeof cloud.get>>),
+        title,
+        text: html.replace(/<[^>]*>/gu, ""),
+      };
+      cloud.set(id, saved);
+      return structuredClone(saved);
+    };
+    const publish = f.publisher.publish;
+    f.publisher.publish = async (title, html, draft) => {
+      const result = await publish(title, html, draft);
+      return { id: draft?.draftId ?? result.id };
+    };
+    const audit = {
+      ...f.options,
+      now: new Date("2026-11-14T01:30:00Z"),
+      slot: "2026-11-14T11:30+08:00",
+      seriesStartDate: "2026-11-14",
+    };
+    return { ...f, cloud, audit, creations: () => creations };
+  }
+  it("maps all review slots two hours before publication and rolls tomorrow in Shanghai", () => {
+    for (const hour of [1, 7, 12])
+      expect(reviewSlot(new Date(`2026-11-14T${String(hour).padStart(2, "0")}:30:00Z`))).toBe(
+        publicationSlot(new Date(`2026-11-14T${String(hour + 2).padStart(2, "0")}:30:00Z`)),
+      );
+    expect(reviewSlot(new Date("2026-11-14T01:45:00Z"))).toBeUndefined();
+    expect(nextPublicationSlot(new Date("2026-11-14T15:00:00Z"))).toBe("2026-11-15T11:30+08:00");
+  });
+  it("audits every eligible article into a verified draft without publishing or moving", async () => {
+    const f = reviewFixture();
+    expect(await auditArticles(f.audit)).toMatchObject({
+      approved: 2,
+      blocked: 0,
+      published: 0,
+      archived: 0,
+    });
+    expect(f.posts()).toBe(0);
+    expect(f.nodes.get("one")?.title).toBe("%first");
+    expect(f.state.drafts?.every((d) => d.status === "ready" && d.reviewMode === "automatic")).toBe(
+      true,
+    );
+    await auditArticles(f.audit);
+    expect(f.creations()).toBe(2);
+    expect(
+      await runArticles({ ...f.options, requirePreflight: true, seriesStartDate: "2026-11-14" }),
+    ).toMatchObject({ published: 1 });
+    expect(f.posts()).toBe(1);
+  });
+  it("does not publish unreviewed or edited sources, while an independent approved article can proceed", async () => {
+    const f = reviewFixture();
+    expect(await runArticles({ ...f.options, requirePreflight: true })).toMatchObject({
+      published: 0,
+      status: "blocked",
+    });
+    await auditArticles(f.audit);
+    (f.nodes.get("child") as RemNode).title = "Changed after review";
+    expect(await runArticles({ ...f.options, requirePreflight: true })).toMatchObject({
+      published: 1,
+    });
+    expect(f.nodes.get("one")?.title).toBe("%first");
+    expect(f.nodes.get("two")?.title).toBe("second");
+    expect(articleFeedback(f.state, f.options.now, "publish").issues).toBe(1);
+  });
+  it("keeps article failures through empty runs and resolves them only after a successful review", async () => {
+    const f = reviewFixture(),
+      prepare = f.publisher.prepare;
+    f.publisher.prepare = async (rows) => {
+      if (rows[0]?.remId === "one") throw Error("mention_unresolved");
+      return prepare(rows);
+    };
+    expect(await auditArticles(f.audit)).toMatchObject({ approved: 1, blocked: 1 });
+    expect(articleFeedback(f.state, new Date("2026-11-14T05:00:00Z"), "publish").issues).toBe(1);
+    f.publisher.prepare = prepare;
+    expect(await auditArticles(f.audit)).toMatchObject({ approved: 2, blocked: 0 });
+    expect(articleFeedback(f.state, f.options.now, "audit").issues).toBe(0);
+  });
+  it("preserves human-held review drafts and author edits", async () => {
+    const f = reviewFixture();
+    await saveReviewDraft({ ...f.audit, sourceRemId: "one" });
+    expect(await auditArticles(f.audit)).toMatchObject({ blocked: 1, approved: 1 });
+    const one = f.state.drafts?.find((d) => d.source.remId === "one");
+    expect(one?.status).toBe("review");
+    const two = f.state.drafts?.find((d) => d.source.remId === "two");
+    (f.cloud.get(two?.draftId as string) as { text: string }).text = "Author changed this";
+    expect(await auditArticles(f.audit)).toMatchObject({ blocked: 2 });
+    expect(f.cloud.get(two?.draftId as string)?.text).toBe("Author changed this");
+  });
+  it("does not recreate a draft after an unknown creation outcome", async () => {
+    const f = reviewFixture();
+    (f.nodes.get("two") as RemNode).title = "second";
+    let tries = 0;
+    f.publisher.createDraft = async () => {
+      tries++;
+      throw Error("timeout");
+    };
+    await auditArticles(f.audit);
+    await auditArticles(f.audit);
+    expect(tries).toBe(1);
+    expect(f.posts()).toBe(0);
+  });
+  it("binds approval to the publication slot and refuses changed cloud content", async () => {
+    const f = reviewFixture();
+    await auditArticles(f.audit);
+    expect(
+      await runArticles({
+        ...f.options,
+        requirePreflight: true,
+        now: new Date("2026-11-14T09:30:00Z"),
+      }),
+    ).toMatchObject({ published: 0 });
+    const draft = f.state.drafts?.[0];
+    (f.cloud.get(draft?.draftId as string) as { text: string }).text = "Edited in Zhihu";
+    await expect(runArticles({ ...f.options, requirePreflight: true })).rejects.toThrow(
+      "cloud draft changed",
+    );
+    expect(f.posts()).toBe(0);
+  });
   it("publishes external tagged content in place, switches only workflow tags and clears the marker", async () => {
     const f = taggedFixture();
     const source = await snapshotArticle(f.remnote, "external");

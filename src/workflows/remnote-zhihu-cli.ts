@@ -14,15 +14,20 @@ import {
   adoptPublishedArticle,
   type CloudDraft,
   type MentionBinding,
+  nextPublicationSlot,
+  publicationSlot,
+  reviewSlot,
   runArticles,
   type SeriesStats,
   saveReviewDraft,
   scanArticles,
 } from "./remnote-zhihu.js";
+import { articleFeedback, auditArticles, reviewIssue } from "./remnote-zhihu-review.js";
 
 const Config = z.object({
   documentRemId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
   documentTitle: z.string().optional(),
+  knowledgeBaseId: z.string().min(1).optional(),
   mcpUrl: z.url(),
   python: z.string().min(1),
   cookieSnapshot: z.string().min(1),
@@ -43,6 +48,7 @@ const Config = z.object({
   mentionBindings: z
     .array(z.object({ name: z.string().min(1).max(100), id: z.string().regex(/^[a-f0-9]{32}$/u) }))
     .optional(),
+  requirePreflight: z.boolean().optional(),
 });
 type Config = z.infer<typeof Config>;
 
@@ -59,6 +65,14 @@ const ArticleRemSchema = z.object({
 
 /** Article-only tag extension; the existing command adapter remains unchanged. */
 export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
+  override async connect(url: string, knowledgeBaseId?: string): Promise<void> {
+    await super.connect(url);
+    if (knowledgeBaseId) {
+      const status = (await this.call("remnote_status", {})) as { knowledgeBaseId?: string };
+      if (status.knowledgeBaseId !== knowledgeBaseId)
+        throw new Error("RemNote knowledge base changed; source library is not connected");
+    }
+  }
   async richText(remId: string): Promise<Array<Record<string, unknown>>> {
     const result = z
       .object({ remId: z.string(), content: z.array(z.record(z.string(), z.unknown())) })
@@ -304,6 +318,25 @@ function readState(file: string): ArticleState {
       )
         throw new Error("invalid saved draft; state was preserved");
   }
+  if (state.reviews !== undefined)
+    z.array(
+      z
+        .object({
+          sourceRemId: z.string().min(1),
+          title: z.string(),
+          slot: z.string().regex(/^\d{4}-\d{2}-\d{2}T(11|17|22):30\+08:00$/u),
+          checkedAt: z.iso.datetime(),
+          fingerprint: z
+            .string()
+            .regex(/^[a-f0-9]{64}$/u)
+            .optional(),
+          draftId: z.string().regex(/^\d+$/u).optional(),
+          editorUrl: z.string().optional(),
+          status: z.enum(["approved", "blocked", "resolved", "withdrawn"]),
+          issues: z.array(z.string()),
+        })
+        .refine((r) => r.status !== "approved" || Boolean(r.fingerprint && r.draftId)),
+    ).parse(state.reviews);
   return state;
 }
 
@@ -311,14 +344,23 @@ async function main(): Promise<void> {
   const [action, configFile, sourceRemId, articleId] = process.argv.slice(2);
   if (
     !action ||
-    !["check", "scan", "preview", "run", "publish-now", "adopt", "draft", "approve-draft"].includes(
-      action,
-    ) ||
+    ![
+      "check",
+      "scan",
+      "preview",
+      "run",
+      "tick",
+      "audit",
+      "publish-now",
+      "adopt",
+      "draft",
+      "approve-draft",
+    ].includes(action) ||
     !configFile ||
     !path.isAbsolute(configFile)
   )
     throw new Error(
-      "usage: remnote-zhihu-cli.js check|scan|preview|run|publish-now|adopt|draft|approve-draft <absolute-config.json> [sourceRemId articleId]",
+      "usage: remnote-zhihu-cli.js check|scan|preview|run|tick|audit|publish-now|adopt|draft|approve-draft <absolute-config.json> [sourceRemId articleId]",
     );
   const config = Config.parse(JSON.parse(fs.readFileSync(configFile, "utf8")));
   for (const target of [config.python, config.cookieSnapshot])
@@ -328,16 +370,30 @@ async function main(): Promise<void> {
   const home = path.dirname(configFile);
   if (action === "publish-now" && !sourceRemId)
     throw new Error("publish-now requires an exact approved source");
-  const release = ["run", "publish-now", "adopt", "draft", "approve-draft"].includes(action)
+  const release = [
+    "run",
+    "tick",
+    "audit",
+    "publish-now",
+    "adopt",
+    "draft",
+    "approve-draft",
+  ].includes(action)
     ? lock(path.join(home, "run.lock"))
     : () => {};
   const remnote = new ArticleRemNoteMcp();
+  let activeState: ArticleState | undefined;
   try {
-    await remnote.connect(config.mcpUrl);
+    if (["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action))
+      activeState = readState(path.join(home, "state.json"));
+    await remnote.connect(config.mcpUrl, config.knowledgeBaseId);
     const publisher = new ZhihuPublisher(config);
-    if (["run", "publish-now", "adopt", "draft", "approve-draft"].includes(action)) {
+    if (
+      ["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action)
+    ) {
       const stateFile = path.join(home, "state.json");
-      const state = readState(stateFile);
+      const state = activeState as ArticleState;
+      activeState = state;
       const shared = {
         remnote,
         publisher,
@@ -347,8 +403,34 @@ async function main(): Promise<void> {
         ...(config.publishedTagRemId ? { publishedTagRemId: config.publishedTagRemId } : {}),
         ...(config.aiGeneratedTagRemId ? { aiGeneratedTagRemId: config.aiGeneratedTagRemId } : {}),
         state,
+        ...(config.requirePreflight ? { requirePreflight: true } : {}),
         save: () => atomicJson(stateFile, state),
       };
+      const now = new Date();
+      const audit = action === "audit" || (action === "tick" && !publicationSlot(now));
+      if (audit) {
+        if (!config.seriesStartDate) throw new Error("series start date is required for review");
+        const slot = reviewSlot(now) ?? nextPublicationSlot(now);
+        const result = await auditArticles({
+          ...shared,
+          now,
+          slot,
+          seriesStartDate: config.seriesStartDate,
+        });
+        const feedback = articleFeedback(state, new Date(), "audit", slot);
+        const finishedAt = new Date().toISOString();
+        const summary = `格式审核完成：通过 ${result.approved} 篇，待处理 ${feedback.issues} 项。${result.reviewed ? "审核通过稿件等待正式发布时点。" : "当前没有符合条件的待发布文章。"}`;
+        atomicJson(path.join(home, "last-run.json"), {
+          at: finishedAt,
+          finishedAt,
+          ...result,
+          issues: feedback.issues,
+          summary,
+          feedback,
+        });
+        console.log(JSON.stringify({ ...result, summary, feedback }));
+        return;
+      }
       if (action === "draft") {
         if (!config.seriesStartDate)
           throw new Error("series start date must be configured for preview");
@@ -404,7 +486,19 @@ async function main(): Promise<void> {
         ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
       });
       const finishedAt = new Date().toISOString();
-      atomicJson(path.join(home, "last-run.json"), { at: finishedAt, finishedAt, ...result });
+      const feedback = articleFeedback(state, new Date(), "publish", publicationSlot(new Date()));
+      atomicJson(path.join(home, "last-run.json"), {
+        at: finishedAt,
+        finishedAt,
+        ...result,
+        issues: feedback.issues,
+        summary: feedback.issues
+          ? `仍有 ${feedback.issues} 项审核问题待处理。`
+          : result.published
+            ? "文章已发布并完成归档核验。"
+            : "本次未发布新文章。",
+        feedback,
+      });
       console.log(JSON.stringify(result));
       return;
     }
@@ -453,17 +547,27 @@ async function main(): Promise<void> {
     }
     console.log(JSON.stringify(result));
   } catch (error) {
-    if (action === "run" || action === "publish-now") {
+    if (["run", "tick", "audit", "publish-now"].includes(action)) {
       const finishedAt = new Date().toISOString();
       const message = error instanceof Error ? error.message : "";
       const reason = /^remnote_|^RemNote bridge/u.test(message)
         ? "remnote-unavailable"
         : "workflow-error";
+      if (activeState) {
+        activeState.reviewFailure = { at: finishedAt, issue: reviewIssue(error) };
+        atomicJson(path.join(home, "state.json"), activeState);
+      }
       atomicJson(path.join(home, "last-run.json"), {
         at: finishedAt,
         finishedAt,
         status: "error",
         reason,
+        summary: reviewIssue(error),
+        issues: Math.max(
+          1,
+          activeState ? articleFeedback(activeState, new Date(), "error").issues : 0,
+        ),
+        ...(activeState ? { feedback: articleFeedback(activeState, new Date(), "error") } : {}),
       });
     }
     throw error;
