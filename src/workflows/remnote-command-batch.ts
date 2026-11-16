@@ -14,6 +14,7 @@ import {
 } from "./remnote-todo.js";
 
 const MemberSchema = z.object({
+  trigger: z.literal("pending").optional(),
   taskRemId: z.string().min(1),
   parentRemId: z.string().min(1),
   contextRemId: z.string().min(1),
@@ -64,11 +65,17 @@ export function maintenanceBatch(tasks: TodoTask[]): TodoTask | undefined {
   const documentRemId = tasks[0]?.documentRemId as string;
   if (tasks.some((t) => t.documentRemId !== documentRemId))
     throw new Error("cannot batch different Documents");
+  const pending = tasks.filter((t) => t.trigger === "pending");
   const unnumbered = tasks.filter((t) => sequence(t.title) === undefined);
-  const first = unnumbered.length
-    ? undefined
-    : Math.min(...tasks.map((t) => sequence(t.title) as number));
-  const members = unnumbered.length ? unnumbered : tasks.filter((t) => sequence(t.title) === first);
+  const first =
+    pending.length || unnumbered.length
+      ? undefined
+      : Math.min(...tasks.map((t) => sequence(t.title) as number));
+  const members = pending.length
+    ? pending
+    : unnumbered.length
+      ? unnumbered
+      : tasks.filter((t) => sequence(t.title) === first);
   const renumber =
     first === undefined
       ? []
@@ -94,8 +101,8 @@ export function maintenanceBatch(tasks: TodoTask[]): TodoTask | undefined {
     sourceDeliveryId: `remnote-maintenance-batch:${digest}`,
     prompt: members.map((t) => t.prompt).join("\n\n"),
     commandBatch: batch,
-    ...(tasks[0]?.developerInstructions
-      ? { developerInstructions: tasks[0].developerInstructions }
+    ...(members[0]?.developerInstructions
+      ? { developerInstructions: members[0].developerInstructions }
       : {}),
   };
 }

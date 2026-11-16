@@ -16,7 +16,7 @@ $arguments = '-NoLogo -NoProfile -WindowStyle Hidden -File "'+$runner+'" -Config
 # conhost reports its own success even when the child workflow has failed.
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument $arguments -WorkingDirectory (Split-Path $PSScriptRoot -Parent)
 $now = Get-Date
-$triggers = @(2, 11, 17 | ForEach-Object {
+$triggers = @(1, 2, 11, 17 | ForEach-Object {
     $start = $now.Date.AddHours($_)
     if ($start -le $now) { $start = $start.AddDays(1) }
     New-ScheduledTaskTrigger -Daily -At $start
