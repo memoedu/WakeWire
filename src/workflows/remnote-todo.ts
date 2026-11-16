@@ -32,6 +32,7 @@ export interface RemNoteReader {
 }
 
 export interface TodoTask {
+  trigger?: "pending" | undefined;
   parentRemId?: string;
   commandBatch?: CommandBatch;
   developerInstructions?: string;
@@ -76,7 +77,7 @@ function isTaskRoot(nodes: Map<string, RemNode>, node: RemNode, documentRemId: s
   const parent = nodes.get(node.parentRemId ?? "");
   return (
     node.parentRemId === documentRemId ||
-    (parent?.parentRemId === documentRemId && parent.title === "已开始")
+    (parent?.parentRemId === documentRemId && ["已开始", "待发送"].includes(parent.title.trim()))
   );
 }
 
@@ -102,13 +103,14 @@ export async function relocateStarted(
   documentRemId: string,
   node: RemNode,
   numbered = false,
+  unmarked = false,
 ): Promise<void> {
   const buckets = (await allChildren(remnote, documentRemId)).filter((n) => n.title === "已开始");
   if (buckets.length !== 1) throw new Error("expected one existing 已开始 node in the document");
   const bucket = buckets[0] as RemNode;
   const expected = displayStartedTitle(node.title, numbered).replace(LEGACY_STARTED, "$1");
   // Validate lossless title conversion before moving anything.
-  const writeTitle = startedTitle(node, numbered);
+  const writeTitle = unmarked && !isMarked(node.title) ? undefined : startedTitle(node, numbered);
   if (!node.parentRemId) throw new Error("task parent is missing");
   if (node.parentRemId !== bucket.remId) {
     const siblings = await allChildren(remnote, bucket.remId);
@@ -141,7 +143,7 @@ export async function relocateStarted(
   if (placed.parentRemId !== bucket.remId || placed.title !== node.title) {
     throw new Error("task changed during placement; marker retained");
   }
-  await remnote.updateTitle(node.remId, writeTitle);
+  if (writeTitle !== undefined) await remnote.updateTitle(node.remId, writeTitle);
   const readback = await remnote.read(node.remId);
   if (readback.parentRemId !== bucket.remId || readback.title !== expected) {
     throw new Error("started placement readback mismatch");
@@ -163,6 +165,7 @@ export async function scanTodo(
   progress: (count: number) => void = () => {},
   excludedRemIds: ReadonlySet<string> = new Set(),
   numbered = false,
+  pendingBucketId?: string,
 ): Promise<{ tasks: TodoTask[]; conflicts: string[]; nodeCount: number }> {
   const nodes = new Map<string, RemNode>();
   const pending = [documentRemId];
@@ -189,11 +192,22 @@ export async function scanTodo(
     if (index % 25 === 0) progress(nodes.size);
   }
 
+  const pendingRoots = new Set(
+    [...nodes.values()]
+      .filter(
+        (n) =>
+          n.parentRemId === pendingBucketId &&
+          (n.title.trim() || [...nodes.values()].some((c) => c.parentRemId === n.remId)),
+      )
+      .map((n) => n.remId),
+  );
   const marked = [...nodes.values()].filter((node) => {
+    if (pendingRoots.has(node.remId)) return true;
     if (!isMarked(node.title)) return false;
     let parent = node.parentRemId;
     while (parent && parent !== documentRemId) {
       const ancestor = nodes.get(parent);
+      if (pendingRoots.has(parent)) return false;
       if (ancestor && MAINTENANCE.test(ancestor.title)) return false;
       parent = ancestor?.parentRemId;
     }
@@ -214,6 +228,7 @@ export async function scanTodo(
   const tasks = marked
     .filter((node) => !conflicts.has(node.remId))
     .map((node) => ({
+      ...(pendingRoots.has(node.remId) ? { trigger: "pending" as const } : {}),
       taskRemId: node.remId,
       parentRemId: node.parentRemId as string,
       contextRemId: isTaskRoot(nodes, node, documentRemId)
@@ -292,6 +307,14 @@ export async function acknowledgeStarted(
   if (!receipt.threadId || !receipt.turnId) throw new Error("first turn has not been acknowledged");
   const current = await remnote.read(task.taskRemId);
   const expected = displayStartedTitle(task.title, numbered);
+  if (
+    task.trigger === "pending" &&
+    current.title === task.title &&
+    current.parentRemId === task.parentRemId
+  ) {
+    await relocateStarted(remnote, task.documentRemId, current, numbered, true);
+    return "marked";
+  }
   if (current.title === expected) {
     const buckets = (await allChildren(remnote, task.documentRemId)).filter(
       (n) => n.title === "已开始",

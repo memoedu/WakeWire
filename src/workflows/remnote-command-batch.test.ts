@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { acknowledgeBatch, maintenanceBatch } from "./remnote-command-batch.js";
-import { CommandSourceSchema, scanCommandSource } from "./remnote-command-sources.js";
+import {
+  CommandSourceSchema,
+  ensureCommandBuckets,
+  promoteOvernight,
+  scanCommandSource,
+} from "./remnote-command-sources.js";
 import type { RemNode, RemNoteReader, TodoReceipt } from "./remnote-todo.js";
 
 function fixture(titles: string[]) {
@@ -56,6 +61,54 @@ const accepted: TodoReceipt = {
 };
 
 describe("maintenance batches and sequence advancement", () => {
+  it("sends unmarked pending subtrees together before percent batches without consuming deferred items", async () => {
+    const f = fixture(["%普通", "%1编号"]);
+    const buckets = await ensureCommandBuckets(f.reader, "doc");
+    f.nodes.set("pending-a", {
+      remId: "pending-a",
+      title: "保留原任务",
+      parentRemId: buckets["待发送"],
+    });
+    f.nodes.set("nested-command", {
+      remId: "nested-command",
+      title: "%这是正文中的命令",
+      parentRemId: "pending-a",
+    });
+    f.nodes.set("pending-b", {
+      remId: "pending-b",
+      title: "另一个任务",
+      parentRemId: buckets["待发送"],
+    });
+    f.nodes.set("deferred", {
+      remId: "deferred",
+      title: "%不要发送",
+      parentRemId: buckets["暂时不"],
+    });
+    f.nodes.set("overnight", {
+      remId: "overnight",
+      title: "%夜间事项",
+      parentRemId: buckets["凌晨处理"],
+    });
+    const batch = maintenanceBatch(await f.scan());
+    expect(batch?.commandBatch?.members.map((m) => m.taskRemId)).toEqual([
+      "pending-a",
+      "pending-b",
+    ]);
+    expect(batch?.prompt).toContain("%这是正文中的命令");
+    expect(batch?.developerInstructions).toBeDefined();
+    if (!batch?.commandBatch) throw new Error("expected pending batch");
+    await acknowledgeBatch(f.reader, batch.commandBatch, accepted);
+    await acknowledgeBatch(f.reader, batch.commandBatch, accepted);
+    expect(f.nodes.get("pending-a")?.parentRemId).toBe("started");
+    expect(f.nodes.get("task-1")?.title).toBe("%1编号");
+    expect(f.nodes.get("deferred")?.parentRemId).toBe(buckets["暂时不"]);
+    expect(await promoteOvernight(f.reader, "doc")).toEqual(["overnight"]);
+    expect(await promoteOvernight(f.reader, "doc")).toEqual([]);
+    expect(await ensureCommandBuckets(f.reader, "doc")).toEqual(buckets);
+    expect(maintenanceBatch(await f.scan())?.commandBatch?.members.map((m) => m.taskRemId)).toEqual(
+      ["overnight"],
+    );
+  });
   it("puts all unnumbered tasks in one parallel batch and keeps other Documents independent", async () => {
     const f = fixture(["%第一条", "%第二条"]);
     const tasks = await f.scan();

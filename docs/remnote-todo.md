@@ -1,8 +1,12 @@
 # RemNote 待办定时分发
 
-Windows 计划任务 `WakeWire - RemNote Todo 0200` 每天北京时间 02:00、11:00、17:00 直接运行 `scripts/run-remnote-todo.ps1`。任务名称保留以沿用现有入口。脚本通过本地 RemNote MCP 扫描配置子树，将行首单个 `%` 标记事项的原文投放给 WakeWire。`%%` 和未标记事项保留原位。
+Windows 计划任务 `WakeWire - RemNote Todo 0200` 每天北京时间 01:00 将各 Document 的“凌晨处理”全部子节点移入“待发送”，02:00、11:00、17:00 运行定时发送。任务名称保留以沿用现有入口，仍由 `scripts/run-remnote-todo.ps1` 执行，统一纳入决策工作台的“运行与调度”。“暂时不”用于手工暂存，不自动提升或发送。
 
-普通入口绑定「一次性命令」的固定 Document ID，不再读取原 `to do list`。配置 `maintenanceDocumentsFile` 后，同一进程同时扫描维护根下明确配置的 Document；所有入口复用同一个扫描、原文导出、去重、投递和受理归位实现，共享同一路由的四路并发。维护类的对象范围及工程收尾要求通过原生 `thread/start.developerInstructions` 单独传入，普通命令不设置该字段，用户消息仍为原文。绑定见 [项目维护](remnote-maintenance.md)。
+普通入口绑定「一次性命令」的固定 Document ID。配置 `maintenanceDocumentsFile` 后，从维护根的直接 Document 实时发现当前身份和标题；保存的映射只补充 Context 和旧投递身份。所有入口复用同一个扫描、原文导出、去重、投递和受理归位实现，共享同一路由的四路并发。Context 与工程收尾要求通过原生 `thread/start.developerInstructions` 单独传入，用户消息仍为原文。Document 对应关系只提供检索起点，允许任务必要的跨项目协作。绑定见 [项目维护](remnote-maintenance.md)。
+
+每个入口 Document 都具有“暂时不”“凌晨处理”“待发送”。“待发送”的直接子节点无须 `%`，整棵子树按原顺序合入同一批，优先级高于 Document 其他位置的 `%` 及 `%N`。普通入口没有待发送事项时，沿用原来逐项派发 `%` 的行为。待发送内部的 `%` 作为正文保留，不另拆任务；已完成及暂存分支不参与派发。
+
+待发送先经过既有 RemNote 结构与语言修复服务及独立审查。`pendingRepairModule` 与 `pendingRepairConfig` 绑定该服务的适配与配置；缺少绑定、修复未完成、语义有歧义或回读指纹发生变化时保留原节点并报告，不能跳过修复。修复只处理正文，业务命令留待接收 Thread 执行。自动修复、定时与即时派发共用既有收据；派发与凌晨提升通过同一文件锁互斥。
 
 本工作流设置 `target.maxConcurrent: 4`，最多并行运行四个独立 Thread；有空位即接收下一项，无需等待其他 Thread 的首轮完成。投放按扫描顺序发起，归位按原任务顺序等待受理确认。单个已有 Thread 的多条投递仍串行，其他未配置并发的路由保持原行为。
 
@@ -23,6 +27,9 @@ WakeWire 在应用返回 Thread ID、确认首轮已受理后立即保存原生 
 ```powershell
 node <installed-dist>/workflows/remnote-todo-cli.js setup <absolute-config.json>
 node <installed-dist>/workflows/remnote-todo-cli.js check <absolute-config.json>
+node <installed-dist>/workflows/remnote-todo-cli.js catalog <absolute-config.json>
+node <installed-dist>/workflows/remnote-todo-cli.js buckets <absolute-config.json>
+node <installed-dist>/workflows/remnote-todo-cli.js promote <absolute-config.json>
 node <installed-dist>/workflows/remnote-todo-cli.js scan <absolute-config.json>
 ```
 
