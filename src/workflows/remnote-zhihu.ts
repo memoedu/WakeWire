@@ -46,6 +46,7 @@ export interface ArticleReceipt {
   html: string;
   text: string;
   format: string;
+  tableOfContents?: boolean;
   stage: "submitting" | "published" | "verified" | "archived";
   bodyText?: string;
   firstPublishedAt?: string;
@@ -80,6 +81,7 @@ export interface CloudDraft {
   text: string;
   format: string;
   state: string;
+  tableOfContents?: boolean;
   editorUrl: string;
 }
 export interface ArticleDraft {
@@ -88,6 +90,7 @@ export interface ArticleDraft {
   html: string;
   text: string;
   format: string;
+  tableOfContents?: boolean;
   status: "creating" | "review" | "ready" | "published";
   draftId?: string;
   editorUrl?: string;
@@ -267,6 +270,7 @@ export interface ArticlePublisher {
     text: string;
     format: string;
     hierarchyMode?: string;
+    tableOfContents?: boolean;
     mentionBindings?: MentionBinding[];
   }>;
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }>;
@@ -281,6 +285,7 @@ export interface ArticlePublisher {
     title: string;
     text: string;
     format: string;
+    tableOfContents?: boolean;
     columnIds: string[];
     url: string;
   }>;
@@ -992,6 +997,8 @@ export async function runArticles(options: {
     verified.title !== prepared.title ||
     verified.text !== prepared.text ||
     verified.format !== prepared.format ||
+    (prepared.tableOfContents !== undefined &&
+      verified.tableOfContents !== prepared.tableOfContents) ||
     !verified.columnIds.includes(receipt.columnId) ||
     verified.url !== `https://zhuanlan.zhihu.com/p/${result.id}`
   )

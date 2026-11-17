@@ -165,6 +165,30 @@ async function fixture() {
 }
 
 describe("prepared Zhihu publication without RemNote", () => {
+  it("persists the expected catalog state and blocks unknown-result replay when it is lost", async () => {
+    for (const catalogSaved of [true, false]) {
+      const f = await fixture();
+      const prepare = f.publisher.prepare.bind(f.publisher);
+      const verify = f.publisher.verify.bind(f.publisher);
+      f.publisher.prepare = async (...args) => ({
+        ...(await prepare(...args)),
+        tableOfContents: true,
+      });
+      f.publisher.verify = async (id) => ({
+        ...(await verify(id)),
+        tableOfContents: catalogSaved,
+      });
+      if (catalogSaved) {
+        expect(await publishPreparedArticles(f.options)).toMatchObject({ published: 1 });
+      } else {
+        await expect(publishPreparedArticles(f.options)).rejects.toThrow("readback mismatch");
+        await expect(publishPreparedArticles(f.options)).rejects.toThrow("readback mismatch");
+      }
+      expect(f.state.receipts[0]?.tableOfContents).toBe(true);
+      expect(f.posts()).toBe(1);
+    }
+  });
+
   for (const action of ["run", "publish-now"] as const)
     it(`runs the actual ${action} CLI with an unreachable RemNote endpoint`, () => {
       const parent =

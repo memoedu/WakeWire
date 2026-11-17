@@ -43,6 +43,8 @@ export async function publishPreparedArticles(options: {
       actual.title !== receipt.title ||
       actual.text !== receipt.text ||
       actual.format !== receipt.format ||
+      (receipt.tableOfContents !== undefined &&
+        actual.tableOfContents !== receipt.tableOfContents) ||
       !actual.columnIds.includes(receipt.columnId) ||
       actual.url !== `https://zhuanlan.zhihu.com/p/${receipt.articleId}`
     )

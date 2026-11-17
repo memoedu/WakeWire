@@ -17,6 +17,39 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_catalog_uses_nonempty_native_headings_without_promoting_plain_text(self):
+        self.assertTrue(adapter.has_catalog_headings('<h2>Only chapter</h2><p>Body</p>'))
+        self.assertTrue(adapter.has_catalog_headings('<h3>Nested chapter</h3>'))
+        for html in ('<h2><br/></h2>', '<p><b>Bold prose</b></p>',
+                     '<pre>&lt;h2&gt;Code example&lt;/h2&gt;</pre>', '<h4>Unsupported heading</h4>'):
+            self.assertFalse(adapter.has_catalog_headings(html))
+
+    def test_catalog_setting_is_submitted_only_for_eligible_articles(self):
+        for body, expected in (('<h2>Chapter</h2><ul><li>Body</li></ul>', True),
+                               ('<ul><li>Plain article</li></ul>', False)):
+            client = MagicMock()
+            client._content_publish.return_value = {'publish': {'id': '666'}}
+            with patch.object(adapter, 'check_column'):
+                adapter.publish_article_content(client, '666', 'Title', body, 'column')
+            payload = client._content_publish.call_args.args[0]['data']
+            self.assertEqual(payload['contentsTables'], {'table_of_contents_enabled': expected})
+            self.assertEqual(payload['hybrid']['html'], body)
+
+    def test_catalog_draft_save_and_missing_setting_readback(self):
+        html = '<h2>Catalog chapter</h2><p>Complete body</p>'
+        before = {'id': '666', 'authorId': 'me', 'state': 'draft', 'title': 'Old', 'text': 'Old body', 'format': 'old'}
+        saved = {**before, 'title': 'Title', 'text': adapter.normalize(html), 'format': adapter.format_structure(html), 'tableOfContents': True}
+        for persisted in (True, False):
+            client = MagicMock()
+            client._session.patch.return_value.status_code = 200
+            with patch.object(adapter, 'read_draft', side_effect=[before, {**saved, 'tableOfContents': persisted}]):
+                if persisted:
+                    self.assertTrue(adapter.write_draft(client, '666', 'Title', html, 'me', before)['tableOfContents'])
+                else:
+                    with self.assertRaisesRegex(ValueError, 'table_of_contents_readback_mismatch'):
+                        adapter.write_draft(client, '666', 'Title', html, 'me', before)
+            self.assertTrue(client._session.patch.call_args.kwargs['json']['table_of_contents'])
+
     def test_overflow_keeps_all_extra_levels_marks_and_native_sibling_return(self):
         nodes = [{"text": "Independent deep outline", "depth": 0}, {"text": "Outer chapter", "depth": 1}]
         nodes += [{"text": "Native level " + str(depth), "depth": depth} for depth in range(2, 7)]
@@ -84,7 +117,7 @@ class AdapterTests(unittest.TestCase):
         client = MagicMock()
         html = '<p>Before <u>underlined words</u> after</p>'
         expected = {'id': '915', 'authorId': 'author', 'title': 'Fixture', 'text': 'Oldbody', 'format': 'old', 'state': 'draft'}
-        saved = {**expected, 'text': adapter.normalize(html), 'format': adapter.format_structure(html.replace('<u>', '').replace('</u>', ''))}
+        saved = {**expected, 'text': adapter.normalize(html), 'format': adapter.format_structure(html.replace('<u>', '').replace('</u>', '')), 'tableOfContents': False}
         client._session.patch.return_value.status_code = 200
         with patch.object(adapter, 'read_draft', side_effect=[expected, saved]):
             with self.assertRaisesRegex(ValueError, 'draft_readback_mismatch'):
@@ -180,7 +213,7 @@ class AdapterTests(unittest.TestCase):
         client = MagicMock()
         expected = {"id": "711", "authorId": "author", "title": "Fixture", "text": "Oldbody", "format": "old", "state": "draft"}
         html = adapter.prepare([{"text": "Reference fixture", "depth": 0}, {"text": "[Standalone reference](https://example.org/ref)", "depth": 1}])["html"]
-        saved = {**expected, "text": adapter.normalize(html), "format": adapter.format_structure(html.replace('link-card', 'ordinary-link'))}
+        saved = {**expected, "text": adapter.normalize(html), "format": adapter.format_structure(html.replace('link-card', 'ordinary-link')), "tableOfContents": False}
         client._session.patch.return_value.status_code = 200
         with patch.object(adapter, 'read_draft', side_effect=[expected, saved]):
             with self.assertRaisesRegex(ValueError, 'link_card_readback_mismatch'):
@@ -456,7 +489,7 @@ class AdapterTests(unittest.TestCase):
             elif url.endswith("/articles/789"):
                 data = dict(cloud)
             elif url.endswith("/draft") and method.upper() == "PATCH":
-                self.assertEqual(kwargs["json"], {"title": "A title", "content": "<p>Independent body</p>"})
+                self.assertEqual(kwargs["json"], {"title": "A title", "content": "<p>Independent body</p>", "table_of_contents": False})
                 cloud.update(kwargs["json"])
                 data = dict(cloud)
             elif url.endswith("/draft"):
