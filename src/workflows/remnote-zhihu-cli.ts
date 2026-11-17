@@ -51,6 +51,7 @@ const Config = z.object({
     .array(z.object({ name: z.string().min(1).max(100), id: z.string().regex(/^[a-f0-9]{32}$/u) }))
     .optional(),
   requirePreflight: z.boolean().optional(),
+  controlledSync: z.boolean().optional(),
 });
 type Config = z.infer<typeof Config>;
 
@@ -153,8 +154,17 @@ export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
 
 export class ZhihuPublisher implements ArticlePublisher {
   constructor(private readonly config: Config) {}
-  private async call<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {
-    const script = fileURLToPath(new URL("../../scripts/zhihu-client.py", import.meta.url));
+  private async call<T>(
+    action: string,
+    args: Record<string, unknown> = {},
+    helper = false,
+  ): Promise<T> {
+    const script = fileURLToPath(
+      new URL(
+        helper ? "../../scripts/zhihu_sync.py" : "../../scripts/zhihu-client.py",
+        import.meta.url,
+      ),
+    );
     return new Promise((resolve, reject) => {
       const child = spawn(this.config.python, ["-X", "utf8", script], {
         windowsHide: true,
@@ -248,6 +258,12 @@ export class ZhihuPublisher implements ArticlePublisher {
   createDraft(): Promise<{ id: string }> {
     return this.call("create-draft");
   }
+  syncModel<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {
+    return this.call(action, args, true);
+  }
+  updatePublished(args: Record<string, unknown>): Promise<{ id: string }> {
+    return this.call("update-published", args);
+  }
   readDraft(articleId: string): Promise<CloudDraft> {
     return this.call("read-draft", { articleId });
   }
@@ -283,6 +299,77 @@ function atomicJson(file: string, value: unknown): void {
     fs.closeSync(descriptor);
   }
   fs.renameSync(temporary, file);
+}
+
+async function controlledHook(
+  action: string,
+  configFile: string,
+  state: ArticleState,
+  slot?: string,
+): Promise<{
+  updated?: number;
+  checked?: number;
+  synchronized?: number;
+  revisions?: number;
+  updates?: Array<{ id: string; title: string; url: string; kind: string }>;
+}> {
+  try {
+    return await new Promise((resolve, reject) => {
+      const script = fileURLToPath(
+        new URL("../../scripts/zhihu-controlled-sync.mjs", import.meta.url),
+      );
+      const child = spawn(
+        process.execPath,
+        [script, action, configFile, String(process.pid), ...(slot ? [slot] : [])],
+        { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      child.stdout.setEncoding("utf8");
+      let output = "";
+      let stopped: string | undefined;
+      const stop = (reason: string) => {
+        if (stopped) return;
+        stopped = reason;
+        if (process.platform === "win32" && child.pid) {
+          // Terminate only this owned hook and its API helpers before releasing the workflow lock.
+          const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+            windowsHide: true,
+            stdio: "ignore",
+          });
+          killer.on("error", () => child.kill());
+        } else child.kill();
+      };
+      const timer = setTimeout(() => {
+        stop("sync_hook_timeout_requires_review");
+      }, 600000);
+      child.stdout.on("data", (data: string) => {
+        output += data;
+        if (output.length > 16384) {
+          stop("sync_hook_output_invalid");
+        }
+      });
+      child.stderr.resume();
+      child.on("error", () => {
+        clearTimeout(timer);
+        reject(new Error("sync_hook_failed"));
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        try {
+          if (stopped) throw new Error(stopped);
+          if (code !== 0) throw new Error("sync_hook_failed");
+          resolve(JSON.parse(output));
+        } catch {
+          reject(new Error("sync_hook_failed"));
+        }
+      });
+    });
+  } finally {
+    // The child owns the same workflow state under our existing run lock.
+    const fresh = readState(path.join(path.dirname(configFile), "state.json"));
+    for (const key of Object.keys(state))
+      if (!(key in fresh)) delete (state as unknown as Record<string, unknown>)[key];
+    Object.assign(state, fresh);
+  }
 }
 
 function lock(file: string): () => void {
@@ -457,6 +544,10 @@ async function main(): Promise<void> {
         save: () => atomicJson(stateFile, state),
       };
       if (preparedPublication) {
+        const revision =
+          config.controlledSync && action !== "publish-now"
+            ? await controlledHook("publish", configFile, state, publicationSlot(new Date()))
+            : {};
         const result = await publishPreparedArticles({
           ...shared,
           now,
@@ -472,10 +563,11 @@ async function main(): Promise<void> {
           const finishedAt = new Date().toISOString();
           const feedback = {
             ...articleFeedback(state, new Date(), "publish", publicationSlot(new Date())),
-            publications: result.publications,
+            publications: [...result.publications, ...(revision.updates ?? [])],
           };
-          const summary =
-            result.published || result.publications.length
+          const summary = revision.updated
+            ? `已定时更新原文章 ${revision.updated} 篇；新发布 ${result.published} 篇。`
+            : result.published || result.publications.length
               ? `文章已发布并完成知乎回读。${result.archivePending ? `RemNote 归档待完成 ${result.archivePending} 篇，恢复连接后补做。` : "归档已完成。"}`
               : result.archivePending
                 ? `已发布文章仍有 ${result.archivePending} 篇待归档。`
@@ -484,6 +576,8 @@ async function main(): Promise<void> {
             at: finishedAt,
             finishedAt,
             ...result,
+            status: revision.updated ? "published" : result.status,
+            updated: revision.updated ?? 0,
             issues: feedback.issues,
             summary,
             feedback,
@@ -493,6 +587,7 @@ async function main(): Promise<void> {
         };
         report(); // Persist publication status before any attempt to connect to RemNote.
         Object.assign(result, await archivePreparedArticles({ ...shared, reader }));
+        if (config.controlledSync) await controlledHook("seed", configFile, state);
         console.log(JSON.stringify(report()));
         return;
       }
@@ -501,6 +596,9 @@ async function main(): Promise<void> {
         if (!config.seriesStartDate) throw new Error("series start date is required for review");
         const recovered = await archivePreparedArticles({ ...shared, reader });
         const slot = reviewSlot(now) ?? nextPublicationSlot(now);
+        const synchronization = config.controlledSync
+          ? await controlledHook("audit", configFile, state, slot)
+          : undefined;
         const result = await auditArticles({
           ...shared,
           now,
@@ -508,13 +606,15 @@ async function main(): Promise<void> {
           seriesStartDate: config.seriesStartDate,
         });
         result.archived = recovered.archived;
+        if (config.controlledSync) await controlledHook("seed", configFile, state);
         const feedback = articleFeedback(state, new Date(), "audit", slot);
         const finishedAt = new Date().toISOString();
-        const summary = `格式审核完成：通过 ${result.approved} 篇，待处理 ${feedback.issues} 项。${result.reviewed ? "审核通过稿件等待正式发布时点。" : "当前没有符合条件的待发布文章。"}`;
+        const summary = `${synchronization ? `同步核对 ${synchronization.checked ?? 0} 篇；` : ""}格式审核完成：新稿通过 ${result.approved} 篇，修订通过 ${synchronization?.revisions ?? 0} 篇，待处理 ${feedback.issues} 项。${result.reviewed || synchronization?.revisions ? "审核通过稿件等待正式发布时点。" : "当前没有符合条件的待发布文章。"}`;
         atomicJson(path.join(home, "last-run.json"), {
           at: finishedAt,
           finishedAt,
           ...result,
+          ...(synchronization ? { synchronization } : {}),
           issues: feedback.issues,
           summary,
           feedback,

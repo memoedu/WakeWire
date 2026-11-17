@@ -6,7 +6,7 @@ from zhihu_article_format import normalize,format_structure
 
 spec=importlib.util.spec_from_file_location('sync_adapter',Path(__file__).with_name('zhihu-client.py'))
 adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
-FOOTER=re.compile(r'(<p(?:\s[^>]*)?>\s*<br\s*/?>\s*</p>)(<p(?:\s[^>]*)?>第\d+\s*篇\s*\|\s*day\s*\d+</p>)?<p(?:\s[^>]*)?>首次发布时间：\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}</p>\s*$')
+FOOTER=re.compile(r'(<p(?:\s[^>]*)?>\s*<br\s*/?>\s*</p>)(<p(?:\s[^>]*)?>第\d+\s*篇\s*\|\s*day\s*\d+</p>)?<p(?:\s[^>]*)?>首次发布时间：(\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}|待发布)</p>\s*$')
 
 def body(article):
     match=FOOTER.search(article['content'])
@@ -26,9 +26,20 @@ def article_plan(source,article):
 
 def main(request):
     action=request['action']
+    if action=='reconcile':
+        from zhihu_sync_merge import reconcile
+        return reconcile(request,article_plan,body)
+    if action=='metadata':
+        html,footer=body(request['article'])
+        match=FOOTER.search(request['article']['content'])
+        series=re.search(r'第\d+\s*篇\s*\|\s*day\s*\d+',footer)
+        return {'body':html,'firstPublishedAt':match[3],'seriesLabel':series[0] if series else None}
+    if action=='view':
+        article=request['article'];html=article.get('content','')
+        return {'id':str(article['id']),'authorId':article.get('author',{}).get('id'),'title':article['title'],'text':normalize(html),'format':format_structure(html),'tableOfContents':adapter.catalog_setting(article),'state':article.get('state')}
     if action=='assert-published':
         before,article=request['before'],request['article']
-        if not article or before['title']!=article['title'] or normalize(before['content'])!=normalize(article['content']) or format_structure(before['content'])!=format_structure(article['content']):
+        if not article or before['title']!=article['title'] or normalize(before['content'])!=normalize(article['content']) or format_structure(before['content'])!=format_structure(article['content']) or adapter.catalog_setting(before)!=adapter.catalog_setting(article):
             raise ValueError('sync_published_changed_during_planning')
         return {'unchanged':True}
     if action=='plan':
@@ -52,9 +63,17 @@ def main(request):
             siblings=[n['remId'] for n in source['nodes'] if n.get('parentRemId')==gap['parentId']]
             if siblings.index(gap['id'])!=siblings.index(gap['beforeId'])-1:raise ValueError('sync_readback_blank_position_mismatch')
         return {'verified':True,'nodes':len(source['nodes']),'visibleNodes':len(plan['nodes']),'publicationFooter':plan['publicationFooter'],'retainedOriginalNodes':len(before['nodes'])}
-    cfg=json.loads(Path(request['configFile']).read_text(encoding='utf-8-sig'))
+    cfg=json.loads(Path(request['configFile']).read_text(encoding='utf-8-sig')) if request.get('configFile') else {'cookieSnapshot':request['snapshotPath'],'accountId':request['expectedAccountId']}
     with adapter.load_client(cfg['cookieSnapshot']) as client:
         if client.get_self_info()['id']!=cfg['accountId']:raise ValueError('sync_account_changed')
+        if action=='read-article':
+            article_id=request['id']
+            if not re.fullmatch(r'\d+',article_id):raise ValueError('sync_invalid_article_id')
+            suffix='/draft' if request.get('draft') else ''
+            article=client._get(f'https://zhuanlan.zhihu.com/api/articles/{article_id}{suffix}')
+            if str(article.get('id'))!=article_id or article.get('author',{}).get('id')!=cfg['accountId'] or article.get('content_need_truncated'):
+                raise ValueError('sync_article_identity_changed')
+            return article
         if action=='read-published':
             ids=request['ids']
             if not ids or len(ids)>100 or len(set(ids))!=len(ids):raise ValueError('sync_invalid_article_scope')

@@ -1,5 +1,5 @@
 """Conservative article-to-outline model: stable existing identities, additive changes only."""
-import json,re,difflib
+import json,re,difflib,copy
 from collections import Counter
 from html import unescape
 from html.parser import HTMLParser
@@ -18,7 +18,7 @@ def merge_runs(runs):
         if 'text' in run and not run['text']:continue
         if result and 'text' in run and 'text' in result[-1] and {k:v for k,v in run.items() if k!='text'}=={k:v for k,v in result[-1].items() if k!='text'}:
             result[-1]['text']+=run['text']
-        else:result.append(run)
+        else:result.append(copy.deepcopy(run))
     return result
 def inline(parts,marks=None):
     marks=marks or {};result=[]
