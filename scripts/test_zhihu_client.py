@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from zhihu_cli.client import ZhihuClient
+from zhihu_outline_overflow import overflow_spaces
 
 spec = importlib.util.spec_from_file_location("zhihu_adapter", Path(__file__).with_name("zhihu-client.py"))
 adapter = importlib.util.module_from_spec(spec)
@@ -16,6 +17,83 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_catalog_uses_nonempty_native_headings_without_promoting_plain_text(self):
+        self.assertTrue(adapter.has_catalog_headings('<h2>Only chapter</h2><p>Body</p>'))
+        self.assertTrue(adapter.has_catalog_headings('<h3>Nested chapter</h3>'))
+        for html in ('<h2><br/></h2>', '<p><b>Bold prose</b></p>',
+                     '<pre>&lt;h2&gt;Code example&lt;/h2&gt;</pre>', '<h4>Unsupported heading</h4>'):
+            self.assertFalse(adapter.has_catalog_headings(html))
+
+    def test_catalog_setting_is_submitted_only_for_eligible_articles(self):
+        for body, expected in (('<h2>Chapter</h2><ul><li>Body</li></ul>', True),
+                               ('<ul><li>Plain article</li></ul>', False)):
+            client = MagicMock()
+            client._content_publish.return_value = {'publish': {'id': '666'}}
+            with patch.object(adapter, 'check_column'):
+                adapter.publish_article_content(client, '666', 'Title', body, 'column')
+            payload = client._content_publish.call_args.args[0]['data']
+            self.assertEqual(payload['contentsTables'], {'table_of_contents_enabled': expected})
+            self.assertEqual(payload['hybrid']['html'], body)
+
+    def test_catalog_draft_save_and_missing_setting_readback(self):
+        html = '<h2>Catalog chapter</h2><p>Complete body</p>'
+        before = {'id': '666', 'authorId': 'me', 'state': 'draft', 'title': 'Old', 'text': 'Old body', 'format': 'old'}
+        saved = {**before, 'title': 'Title', 'text': adapter.normalize(html), 'format': adapter.format_structure(html), 'tableOfContents': True}
+        for persisted in (True, False):
+            client = MagicMock()
+            client._session.patch.return_value.status_code = 200
+            with patch.object(adapter, 'read_draft', side_effect=[before, {**saved, 'tableOfContents': persisted}]):
+                if persisted:
+                    self.assertTrue(adapter.write_draft(client, '666', 'Title', html, 'me', before)['tableOfContents'])
+                else:
+                    with self.assertRaisesRegex(ValueError, 'table_of_contents_readback_mismatch'):
+                        adapter.write_draft(client, '666', 'Title', html, 'me', before)
+            self.assertTrue(client._session.patch.call_args.kwargs['json']['table_of_contents'])
+
+    def test_overflow_keeps_all_extra_levels_marks_and_native_sibling_return(self):
+        nodes = [{"text": "Independent deep outline", "depth": 0}, {"text": "Outer chapter", "depth": 1}]
+        nodes += [{"text": "Native level " + str(depth), "depth": depth} for depth in range(2, 7)]
+        nodes += [{"text": "Child link", "depth": 7, "richText": [{"type": "link", "url": "https://example.org/reference", "children": [{"text": "Child link", "underline": True}]}]},
+                  {"text": "Grandchild", "depth": 8, "richText": [{"text": "Grandchild", "bold": True}]},
+                  {"text": "$x^2$\nNext line", "depth": 9},
+                  {"text": "Overflow sibling", "depth": 7},
+                  {"text": "Native sibling", "depth": 6}]
+        result = adapter.prepare(nodes, "待发布")
+        self.assertEqual(result['hierarchyMode'], 'overflow-spaces')
+        self.assertIn('<br/>　　• <a href="https://example.org/reference"><u>Child link</u></a>', result['html'])
+        self.assertIn('<br/>　　　　• <strong>Grandchild</strong>', result['html'])
+        self.assertIn('<br/>　　　　　　• <img ', result['html'])
+        self.assertRegex(result['html'], r'<br\s*/>\s*Next line<br/>　　• Overflow sibling</li><li>Native sibling</li>')
+        layout = json.loads(result['format'])
+        self.assertEqual(max(b['depth'] for b in layout['blocks']), 5)
+        self.assertEqual(sum(s[0] == 'math' for s in layout['styles']), 1)
+        self.assertEqual(layout['blocks'][-3]['text'], 'Nativesibling')
+
+    def test_overflow_indent_spaces_bullets_and_breaks_are_part_of_readback(self):
+        nodes = [{"text": "Overflow comparison", "depth": 0}]
+        nodes += [{"text": "Level " + str(depth), "depth": depth} for depth in range(1, 8)]
+        result = adapter.prepare(nodes)
+        for changed in (result['html'].replace('　　• ', '• '),
+                        result['html'].replace('　　• ', '　• '),
+                        result['html'].replace('　　• ', '　　◦ '),
+                        result['html'].replace('<br/>　　• ', '　　• ')):
+            self.assertNotEqual(adapter.format_structure(changed), result['format'])
+        self.assertNotEqual(adapter.normalize(result['html'].replace('　　• ', '• ')), result['text'])
+
+    def test_overflow_transform_leaves_shallow_html_byte_identical(self):
+        html = '<h2>A &amp; B</h2><ul><li><b>Normal</b><br/>line</li><ul><li><u>Detail</u></li></ul></ul><p><br/></p>'
+        self.assertEqual(overflow_spaces(html), html)
+
+    def test_overflow_transform_supports_conventional_nested_li(self):
+        html = '<ul><li>A<ul><li>B<ul><li><u>C</u></li></ul></li></ul></li></ul>'
+        self.assertIn('<li>B<br/>　　• <u>C</u></li>', overflow_spaces(html, limit=2))
+
+    def test_overflow_orphan_and_unbalanced_structures_stay_blocked(self):
+        with self.assertRaisesRegex(ValueError, 'hierarchy_overflow_parent_missing'):
+            overflow_spaces('<ul><li>A</li><ul><ul><li>C</li></ul></ul></ul>', limit=2)
+        with self.assertRaisesRegex(ValueError, 'hierarchy_overflow_unbalanced'):
+            overflow_spaces('<ul><li>A</ul>')
+
     def test_native_underline_preserves_exact_ranges_and_composes_with_existing_marks(self):
         nodes = [{"text": "Underline fixture", "depth": 0}, {"text": "Before marked text after", "depth": 1,
                  "richText": [{"text": "Before "}, {"text": "marked text", "underline": True, "bold": True}, {"text": " after"}]}]
@@ -39,7 +117,7 @@ class AdapterTests(unittest.TestCase):
         client = MagicMock()
         html = '<p>Before <u>underlined words</u> after</p>'
         expected = {'id': '915', 'authorId': 'author', 'title': 'Fixture', 'text': 'Oldbody', 'format': 'old', 'state': 'draft'}
-        saved = {**expected, 'text': adapter.normalize(html), 'format': adapter.format_structure(html.replace('<u>', '').replace('</u>', ''))}
+        saved = {**expected, 'text': adapter.normalize(html), 'format': adapter.format_structure(html.replace('<u>', '').replace('</u>', '')), 'tableOfContents': False}
         client._session.patch.return_value.status_code = 200
         with patch.object(adapter, 'read_draft', side_effect=[expected, saved]):
             with self.assertRaisesRegex(ValueError, 'draft_readback_mismatch'):
@@ -135,7 +213,7 @@ class AdapterTests(unittest.TestCase):
         client = MagicMock()
         expected = {"id": "711", "authorId": "author", "title": "Fixture", "text": "Oldbody", "format": "old", "state": "draft"}
         html = adapter.prepare([{"text": "Reference fixture", "depth": 0}, {"text": "[Standalone reference](https://example.org/ref)", "depth": 1}])["html"]
-        saved = {**expected, "text": adapter.normalize(html), "format": adapter.format_structure(html.replace('link-card', 'ordinary-link'))}
+        saved = {**expected, "text": adapter.normalize(html), "format": adapter.format_structure(html.replace('link-card', 'ordinary-link')), "tableOfContents": False}
         client._session.patch.return_value.status_code = 200
         with patch.object(adapter, 'read_draft', side_effect=[expected, saved]):
             with self.assertRaisesRegex(ValueError, 'link_card_readback_mismatch'):
@@ -411,7 +489,7 @@ class AdapterTests(unittest.TestCase):
             elif url.endswith("/articles/789"):
                 data = dict(cloud)
             elif url.endswith("/draft") and method.upper() == "PATCH":
-                self.assertEqual(kwargs["json"], {"title": "A title", "content": "<p>Independent body</p>"})
+                self.assertEqual(kwargs["json"], {"title": "A title", "content": "<p>Independent body</p>", "table_of_contents": False})
                 cloud.update(kwargs["json"])
                 data = dict(cloud)
             elif url.endswith("/draft"):

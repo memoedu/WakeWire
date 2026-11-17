@@ -217,6 +217,7 @@ export class ZhihuPublisher implements ArticlePublisher {
     text: string;
     format: string;
     hierarchyMode?: string;
+    tableOfContents?: boolean;
     mentionBindings?: MentionBinding[];
   }> {
     return this.call("prepare", {
@@ -261,6 +262,7 @@ export class ZhihuPublisher implements ArticlePublisher {
     title: string;
     text: string;
     format: string;
+    tableOfContents?: boolean;
     columnIds: string[];
     url: string;
   }> {

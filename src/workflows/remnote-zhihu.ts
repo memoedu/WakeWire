@@ -46,6 +46,7 @@ export interface ArticleReceipt {
   html: string;
   text: string;
   format: string;
+  tableOfContents?: boolean;
   stage: "submitting" | "published" | "verified" | "archived";
   bodyText?: string;
   firstPublishedAt?: string;
@@ -80,6 +81,7 @@ export interface CloudDraft {
   text: string;
   format: string;
   state: string;
+  tableOfContents?: boolean;
   editorUrl: string;
 }
 export interface ArticleDraft {
@@ -88,6 +90,7 @@ export interface ArticleDraft {
   html: string;
   text: string;
   format: string;
+  tableOfContents?: boolean;
   status: "creating" | "review" | "ready" | "published";
   draftId?: string;
   editorUrl?: string;
@@ -179,10 +182,12 @@ export async function saveReviewDraft(options: {
     if (!draft.draftId)
       throw new Error("unknown draft creation result; automatic recreation blocked");
     cloud = await publisher.readDraft(draft.draftId);
-    const matches = (expected: Pick<CloudDraft, "title" | "text" | "format">) =>
+    const matches = (expected: Pick<CloudDraft, "title" | "text" | "format" | "tableOfContents">) =>
       cloud?.title === expected.title &&
       cloud.text === expected.text &&
-      cloud.format === expected.format;
+      cloud.format === expected.format &&
+      (expected.tableOfContents === undefined ||
+        cloud.tableOfContents === expected.tableOfContents);
     if (
       cloud.authorId !== options.accountId ||
       cloud.state !== "draft" ||
@@ -237,7 +242,8 @@ export async function saveReviewDraft(options: {
     saved.state !== "draft" ||
     saved.title !== prepared.title ||
     saved.text !== prepared.text ||
-    saved.format !== prepared.format
+    saved.format !== prepared.format ||
+    (prepared.tableOfContents !== undefined && saved.tableOfContents !== prepared.tableOfContents)
   )
     throw new Error("saved cloud draft readback mismatch");
   draft.editorUrl = saved.editorUrl;
@@ -267,6 +273,7 @@ export interface ArticlePublisher {
     text: string;
     format: string;
     hierarchyMode?: string;
+    tableOfContents?: boolean;
     mentionBindings?: MentionBinding[];
   }>;
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }>;
@@ -281,6 +288,7 @@ export interface ArticlePublisher {
     title: string;
     text: string;
     format: string;
+    tableOfContents?: boolean;
     columnIds: string[];
     url: string;
   }>;
@@ -612,7 +620,10 @@ export function validateArticle(
   const maxDepth = Math.max(
     ...source.nodes.filter((node) => node.text.trim()).map((node) => node.depth),
   );
-  if (maxDepth > 5 && (maxDepth > 6 || prepared.hierarchyMode !== "section-headings"))
+  if (
+    (maxDepth === 6 && prepared.hierarchyMode !== "section-headings") ||
+    (maxDepth > 6 && prepared.hierarchyMode !== "overflow-spaces")
+  )
     throw new Error("Zhihu supports at most five list levels; source hierarchy requires review");
   if (!prepared.title.trim() || [...prepared.title].length > 100 || /[\r\n]/u.test(prepared.title))
     throw new Error("article title must be one line within 100 characters");
@@ -753,6 +764,8 @@ export async function runArticles(options: {
         result.title !== receipt.title ||
         result.text !== receipt.text ||
         result.format !== receipt.format ||
+        (receipt.tableOfContents !== undefined &&
+          result.tableOfContents !== receipt.tableOfContents) ||
         !result.columnIds.includes(receipt.columnId) ||
         result.url !== `https://zhuanlan.zhihu.com/p/${receipt.articleId}`
       )
@@ -885,7 +898,9 @@ export async function runArticles(options: {
       cloud.authorId !== accountId ||
       cloud.title !== savedDraft.title ||
       cloud.text !== savedDraft.text ||
-      cloud.format !== savedDraft.format
+      cloud.format !== savedDraft.format ||
+      (savedDraft.tableOfContents !== undefined &&
+        cloud.tableOfContents !== savedDraft.tableOfContents)
     )
       throw new Error("cloud draft changed; preserve author edits before publication");
   }
@@ -989,6 +1004,8 @@ export async function runArticles(options: {
     verified.title !== prepared.title ||
     verified.text !== prepared.text ||
     verified.format !== prepared.format ||
+    (prepared.tableOfContents !== undefined &&
+      verified.tableOfContents !== prepared.tableOfContents) ||
     !verified.columnIds.includes(receipt.columnId) ||
     verified.url !== `https://zhuanlan.zhihu.com/p/${result.id}`
   )
@@ -1071,6 +1088,8 @@ export async function adoptPublishedArticle(options: {
     url: published.url,
     stage: "verified",
   };
+  if (published.tableOfContents === undefined) delete receipt.tableOfContents;
+  else receipt.tableOfContents = published.tableOfContents;
   state.receipts.push(receipt);
   options.save();
   await archiveArticle(remnote, options.documentRemId, receipt);

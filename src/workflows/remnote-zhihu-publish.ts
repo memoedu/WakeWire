@@ -43,6 +43,8 @@ export async function publishPreparedArticles(options: {
       actual.title !== receipt.title ||
       actual.text !== receipt.text ||
       actual.format !== receipt.format ||
+      (receipt.tableOfContents !== undefined &&
+        actual.tableOfContents !== receipt.tableOfContents) ||
       !actual.columnIds.includes(receipt.columnId) ||
       actual.url !== `https://zhuanlan.zhihu.com/p/${receipt.articleId}`
     )
@@ -111,7 +113,8 @@ export async function publishPreparedArticles(options: {
     cloud.authorId !== options.accountId ||
     cloud.title !== draft.title ||
     cloud.text !== draft.text ||
-    cloud.format !== draft.format
+    cloud.format !== draft.format ||
+    (draft.tableOfContents !== undefined && cloud.tableOfContents !== draft.tableOfContents)
   )
     throw new Error("cloud draft changed; author edits were preserved");
   if (cloud.state === "published") {
@@ -137,6 +140,7 @@ export async function publishPreparedArticles(options: {
   if (
     pending.text !== draft.text ||
     pending.format !== draft.format ||
+    (draft.tableOfContents !== undefined && pending.tableOfContents !== draft.tableOfContents) ||
     mentionIdentity(pending.mentionBindings) !== mentionIdentity(draft.mentionBindings) ||
     mentionIdentity(prepared.mentionBindings) !== mentionIdentity(draft.mentionBindings)
   )

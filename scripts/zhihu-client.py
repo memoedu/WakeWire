@@ -25,6 +25,23 @@ from zhihu_article_format import (
 logging.disable(logging.CRITICAL)
 
 
+def has_catalog_headings(html):
+    """Use only nonempty native chapter headings; never invent headings from prose."""
+    starts = {"h2": [], "h3": []}
+    for style in json.loads(format_structure(html))["styles"]:
+        if style[0] in ("+h2", "+h3"):
+            starts[style[0][1:]].append(style[1])
+        elif style[0] in ("-h2", "-h3"):
+            heading = starts[style[0][1:]]
+            if heading and style[1] > heading.pop():
+                return True
+    return False
+
+
+def catalog_setting(article):
+    return article.get("settings", {}).get("table_of_contents", {}).get("enabled") is True
+
+
 def validate_links(html):
     parser = ArticleLayout()
     parser.feed(canonical_cards(html))
@@ -41,6 +58,7 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, mentio
     result["text"] = normalize(result["html"])
     result["format"] = format_structure(result["html"])
     result["mentionBindings"] = sorted(bindings, key=lambda item: item["name"])
+    result["tableOfContents"] = has_catalog_headings(result["html"])
     validate_links(result["html"])
     return result
 
@@ -161,7 +179,7 @@ def read_article(client, article_id):
     columns.discard(None)
     return {"id": str(article.get("id", "")), "authorId": article.get("author", {}).get("id", ""),
             "title": article.get("title", "") or "", "text": normalize(html), "format": format_structure(html),
-            "columnIds": sorted(columns),
+            "columnIds": sorted(columns), "tableOfContents": catalog_setting(article),
             "url": f"https://zhuanlan.zhihu.com/p/{article_id}"}
 
 
@@ -212,7 +230,8 @@ def read_draft(client, article_id):
     html = article.get("content", "") or ""
     return {"id": str(article.get("id", "")), "authorId": article.get("author", {}).get("id", ""),
             "title": article.get("title", "") or "", "text": normalize(html), "format": format_structure(html),
-            "state": article.get("state", ""), "editorUrl": f"https://zhuanlan.zhihu.com/p/{article_id}/edit"}
+            "state": article.get("state", ""), "tableOfContents": catalog_setting(article),
+            "editorUrl": f"https://zhuanlan.zhihu.com/p/{article_id}/edit"}
 
 
 def create_draft(client):
@@ -228,10 +247,13 @@ def write_draft(client, article_id, title, html, account_id, expected):
         raise ValueError("draft_identity_or_state_changed")
     if any(current[key] != expected[key] for key in ("title", "text", "format")):
         raise ValueError("cloud_draft_edited")
-    response = client._session.patch(f"https://zhuanlan.zhihu.com/api/articles/{article_id}/draft", json={"title": title, "content": html}, timeout=15)
+    catalog = has_catalog_headings(html)
+    response = client._session.patch(f"https://zhuanlan.zhihu.com/api/articles/{article_id}/draft", json={"title": title, "content": html, "table_of_contents": catalog}, timeout=15)
     if response.status_code != 200:
         raise ValueError("draft_save_failed")
     saved = read_draft(client, article_id)
+    if saved["tableOfContents"] != catalog:
+        raise ValueError("article_table_of_contents_readback_mismatch")
     expected_format = format_structure(html)
     if saved["format"] != expected_format:
         expected_cards = [b for b in json.loads(expected_format)["blocks"] if b["kind"] == "card"]
@@ -263,7 +285,7 @@ def publish_article_content(client, article_id, title, html, column_id, is_publi
             "column": {"column": [column_id]},
             "commentsPermission": {"comment_permission": "anyone"},
             "creationStatement": {"disclaimer_type": "none", "disclaimer_status": "close"},
-            "contentsTables": {"table_of_contents_enabled": False},
+            "contentsTables": {"table_of_contents_enabled": has_catalog_headings(html)},
             "commercialReportInfo": {"isReport": 0},
             "appreciate": {"can_reward": False, "tagline": ""},
             "hybrid": {"html": html, "textLength": len("".join(visible.parts).encode("utf-16-le")) // 2},
