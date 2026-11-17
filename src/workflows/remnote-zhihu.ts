@@ -47,6 +47,7 @@ export interface ArticleReceipt {
   text: string;
   format: string;
   tableOfContents?: boolean;
+  seriesLabel?: string;
   stage: "submitting" | "published" | "verified" | "archived";
   bodyText?: string;
   firstPublishedAt?: string;
@@ -91,6 +92,7 @@ export interface ArticleDraft {
   text: string;
   format: string;
   tableOfContents?: boolean;
+  seriesLabel?: string;
   status: "creating" | "review" | "ready" | "published";
   draftId?: string;
   editorUrl?: string;
@@ -149,14 +151,21 @@ export async function saveReviewDraft(options: {
       (!options.sourceRemId || candidate.remId === options.sourceRemId),
   );
   if (!source) throw new Error("no eligible marked source for draft preview");
-  const prepared = await publisher.prepare(source.nodes, "待发布");
-  prepared.title = seriesTitle(
-    prepared.title,
+  const base = await publisher.prepare(source.nodes, "待发布");
+  const numbered = seriesTitle(
+    base.title,
     options.now,
     options.seriesStartDate,
     await publisher.seriesStats(),
     state,
   );
+  const seriesLabel =
+    state.drafts?.find((d) => d.source.remId === source.remId)?.seriesLabel ??
+    numbered.slice(numbered.lastIndexOf("（") + 1, -1);
+  const prepared = {
+    ...(await publisher.prepare(source.nodes, "待发布", seriesLabel)),
+    seriesLabel,
+  };
   const account = await publisher.check();
   if (account.id !== options.accountId || account.columnId !== options.columnId)
     throw new Error("draft account or column changed");
@@ -267,6 +276,7 @@ export interface ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
     firstPublishedAt?: string,
+    seriesLabel?: string,
   ): Promise<{
     title: string;
     html: string;
@@ -318,13 +328,17 @@ export function seriesTitle(
   const day = (Date.parse(`${date}T00:00:00Z`) - start) / 86400000 + 1;
   if (!Number.isInteger(day) || day < 1) throw new Error("series date precedes first publication");
   const local = state.receipts.map((receipt) =>
-    Number(SERIES_SUFFIX.exec(receipt.title)?.[1] ?? 0),
+    Number(
+      SERIES_SUFFIX.exec(receipt.title)?.[1] ??
+        /^第(\d+) 篇/u.exec(receipt.seriesLabel ?? "")?.[1] ??
+        0,
+    ),
   );
   const ordinal = Math.max(stats.publishedCount, stats.maxOrdinal, ...local, 0) + 1;
   if (!Number.isSafeInteger(ordinal) || ordinal < 1) throw new Error("invalid series ordinal");
   const title = `${base.replace(SERIES_SUFFIX, "")}（第${ordinal} 篇 | day ${day}）`;
-  if ([...title].length > 100)
-    throw new Error("article title including series suffix exceeds 100 characters");
+  if ([...base.replace(SERIES_SUFFIX, "")].length > 100)
+    throw new Error("article title exceeds 100 characters");
   return title;
 }
 
@@ -922,15 +936,17 @@ export async function runArticles(options: {
     throw new Error("source trigger changed before publication");
   if (!manual && publicationSlot(options.currentTime?.() ?? options.now) !== slot)
     return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
+  let seriesLabel: string | undefined;
   if (options.seriesStartDate) {
     if (!publisher.seriesStats) throw new Error("series listing is unavailable");
-    prepared.title = seriesTitle(
+    const numbered = seriesTitle(
       prepared.title,
       options.currentTime?.() ?? options.now,
       options.seriesStartDate,
       await publisher.seriesStats(),
       state,
     );
+    seriesLabel = numbered.slice(numbered.lastIndexOf("（") + 1, -1);
     if (!manual && publicationSlot(options.currentTime?.() ?? options.now) !== slot)
       return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   }
@@ -946,7 +962,7 @@ export async function runArticles(options: {
   })
     .format(options.currentTime?.() ?? options.now)
     .replaceAll("-", ".");
-  const stamped = await publisher.prepare(source.nodes, firstPublishedAt);
+  const stamped = await publisher.prepare(source.nodes, firstPublishedAt, seriesLabel);
   if (mentionIdentity(stamped.mentionBindings) !== mentionIdentity(prepared.mentionBindings))
     throw new Error("mention identity changed before submission");
   prepared.html = stamped.html;
@@ -960,6 +976,7 @@ export async function runArticles(options: {
     ...prepared,
     bodyText,
     firstPublishedAt,
+    ...(seriesLabel ? { seriesLabel } : {}),
     columnId: options.columnId,
     stage: "submitting",
     ...(savedDraft?.draftId ? { articleId: savedDraft.draftId } : {}),

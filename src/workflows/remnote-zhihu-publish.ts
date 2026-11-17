@@ -136,7 +136,7 @@ export async function publishPreparedArticles(options: {
   const source = draft.source;
   const prepared = await publisher.prepare(source.nodes);
   validateArticle(source, prepared, state);
-  const pending = await publisher.prepare(source.nodes, "待发布");
+  const pending = await publisher.prepare(source.nodes, "待发布", draft.seriesLabel);
   if (
     pending.text !== draft.text ||
     pending.format !== draft.format ||
@@ -145,15 +145,17 @@ export async function publishPreparedArticles(options: {
     mentionIdentity(prepared.mentionBindings) !== mentionIdentity(draft.mentionBindings)
   )
     throw new Error("approved snapshot or mention identity changed");
+  let seriesLabel: string | undefined;
   if (options.seriesStartDate) {
     if (!publisher.seriesStats) throw new Error("series listing is unavailable");
-    prepared.title = seriesTitle(
+    const numbered = seriesTitle(
       prepared.title,
       options.currentTime?.() ?? options.now,
       options.seriesStartDate,
       await publisher.seriesStats(),
       state,
     );
+    seriesLabel = numbered.slice(numbered.lastIndexOf("（") + 1, -1);
   }
   const bodyText = prepared.text;
   const firstPublishedAt = new Intl.DateTimeFormat("sv-SE", {
@@ -167,7 +169,7 @@ export async function publishPreparedArticles(options: {
   })
     .format(options.currentTime?.() ?? options.now)
     .replaceAll("-", ".");
-  const stamped = await publisher.prepare(source.nodes, firstPublishedAt);
+  const stamped = await publisher.prepare(source.nodes, firstPublishedAt, seriesLabel);
   if (mentionIdentity(stamped.mentionBindings) !== mentionIdentity(draft.mentionBindings))
     throw new Error("mention identity changed before submission");
   if (!manual && publicationSlot(options.currentTime?.() ?? options.now) !== slot)
@@ -181,6 +183,7 @@ export async function publishPreparedArticles(options: {
     format: stamped.format,
     bodyText,
     firstPublishedAt,
+    ...(seriesLabel ? { seriesLabel } : {}),
     articleId: draft.draftId as string,
     columnId: options.columnId,
     stage: "submitting",
