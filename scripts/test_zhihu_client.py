@@ -17,6 +17,15 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_series_metadata_stays_in_footer_with_plain_title_and_original_body(self):
+        nodes=[{'text':'A plain title','depth':0},{'text':'Original body','depth':1}]
+        prepared=adapter.prepare(nodes,'待发布',series_label='第12 篇 | day 5')
+        self.assertEqual(prepared['title'],'A plain title')
+        self.assertTrue(prepared['html'].endswith('<p class="ztext-empty-paragraph"><br/></p><p>第12 篇 | day 5</p><p>首次发布时间：待发布</p>'))
+        self.assertEqual(prepared['seriesLabel'],'第12 篇 | day 5')
+        for invalid in ('第1 篇 | day 0','<script>bad</script>','第0 篇 | day 1'):
+            with self.assertRaisesRegex(ValueError,'series_footer_invalid'):
+                adapter.prepare(nodes,'待发布',series_label=invalid)
     def test_catalog_uses_nonempty_native_headings_without_promoting_plain_text(self):
         self.assertTrue(adapter.has_catalog_headings('<h2>Only chapter</h2><p>Body</p>'))
         self.assertTrue(adapter.has_catalog_headings('<h3>Nested chapter</h3>'))

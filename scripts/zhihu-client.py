@@ -51,8 +51,16 @@ def validate_links(html):
             raise ValueError("article_link_unsupported")
 
 
-def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, mention_bindings=None):
+def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, mention_bindings=None, series_label=None):
     result = prepare_layout(nodes, first_published_at, ai_generated_tag_rem_id)
+    if series_label is not None:
+        if not isinstance(series_label, str) or not re.fullmatch(r"第[1-9]\d* 篇 \| day [1-9]\d*", series_label) or first_published_at is None:
+            raise ValueError("article_series_footer_invalid")
+        tail = "<p>首次发布时间：" + first_published_at + "</p>"
+        if not result["html"].endswith(tail):
+            raise ValueError("article_series_footer_position_invalid")
+        result["html"] = result["html"][:-len(tail)] + "<p>" + series_label + "</p>" + tail
+        result["seriesLabel"] = series_label
     bindings = mention_bindings or []
     result["html"] = apply_mentions(result["html"], bindings)
     result["text"] = normalize(result["html"])
@@ -320,7 +328,7 @@ def main(request):
                 if client.get_self_info().get("id") != request["expectedAccountId"]:
                     raise ValueError("account_changed")
                 bindings = resolve_mentions(client, names, request.get("mentionBindings", []))
-        result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), bindings)
+        result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), bindings, request.get("seriesLabel"))
         validate_links(result["html"])
         return result
     with load_client(request["snapshotPath"]) as client:

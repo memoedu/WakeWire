@@ -160,6 +160,7 @@ export class ZhihuPublisher implements ArticlePublisher {
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
       });
+      child.stdout.setEncoding("utf8");
       let stdout = "";
       let settled = false;
       const finish = (error?: Error, value?: T) => {
@@ -175,8 +176,8 @@ export class ZhihuPublisher implements ArticlePublisher {
       }, 90000);
       child.on("error", () => finish(new Error("Zhihu client could not start")));
       child.stdin.on("error", () => finish(new Error("Zhihu client input failed")));
-      child.stdout.on("data", (data: Buffer) => {
-        stdout += data.toString("utf8");
+      child.stdout.on("data", (data: string) => {
+        stdout += data;
         if (stdout.length > 2000000) {
           child.kill();
           finish(new Error("Zhihu client response too large"));
@@ -211,6 +212,7 @@ export class ZhihuPublisher implements ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
     firstPublishedAt?: string,
+    seriesLabel?: string,
   ): Promise<{
     title: string;
     html: string;
@@ -223,6 +225,7 @@ export class ZhihuPublisher implements ArticlePublisher {
     return this.call("prepare", {
       nodes,
       ...(firstPublishedAt ? { firstPublishedAt } : {}),
+      ...(seriesLabel ? { seriesLabel } : {}),
       ...(this.config.aiGeneratedTagRemId
         ? { aiGeneratedTagRemId: this.config.aiGeneratedTagRemId }
         : {}),

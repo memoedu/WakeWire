@@ -869,7 +869,7 @@ describe("RemNote to Zhihu publishing", () => {
     ).toThrow("start date");
     expect(() =>
       seriesTitle(
-        "T".repeat(100),
+        "T".repeat(101),
         new Date("2026-11-14T12:00:00Z"),
         "2026-11-13",
         { publishedCount: 1, maxOrdinal: 1 },
@@ -929,12 +929,13 @@ describe("RemNote to Zhihu publishing", () => {
     });
     expect(result).toMatchObject({
       status: "draft-review",
-      title: "first（第2 篇 | day 2）",
+      title: "first",
       published: 0,
       moved: 0,
     });
     expect(f.state.receipts).toHaveLength(0);
-    expect(stamps).toEqual(["待发布"]);
+    expect(stamps).toEqual(["待发布", "待发布"]);
+    expect(f.state.drafts?.[0]?.seriesLabel).toBe("第2 篇 | day 2");
     expect(f.nodes.get("one")?.title).toBe("%first");
     await saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" });
     expect(creates).toBe(1);
@@ -1044,7 +1045,7 @@ describe("RemNote to Zhihu publishing", () => {
     expect(f.state.drafts?.map((d) => d.draftId)).toEqual(["888"]);
     expect(f.posts()).toBe(0);
   });
-  it("publishes an approved draft using the saved cloud identity and final series title", async () => {
+  it("publishes an approved draft using its saved identity and a separate final series footer", async () => {
     const f = fixture();
     const source = await snapshotArticle(f.remnote, "one");
     const prepared = await f.publisher.prepare(source.nodes);
@@ -1063,12 +1064,13 @@ describe("RemNote to Zhihu publishing", () => {
     f.publisher.publish = async (actualTitle, _html, draft) => {
       calls++;
       expect(draft?.draftId).toBe("777");
-      expect(actualTitle).toBe(title);
+      expect(actualTitle).toBe("first");
       return { id: "777" };
     };
     await runArticles({ ...f.options, seriesStartDate: "2026-11-13" });
     expect(calls).toBe(1);
     expect(f.state.receipts[0]?.articleId).toBe("777");
+    expect(f.state.receipts[0]?.seriesLabel).toBe("第2 篇 | day 2");
     expect(f.state.drafts[0]?.status).toBe("published");
     expect(f.nodes.get("one")?.parentRemId).toBe("published");
   });
