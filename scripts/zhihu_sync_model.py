@@ -52,6 +52,20 @@ def text_key(runs):return normalize(native_html(runs,[]))
 def signature(runs):return format_structure(native_html(merge_runs(runs),[]))
 def urls(runs):return [r['url'] for r in runs if r.get('type')=='link']
 
+def overflow_rows(runs,depth):
+    """Reverse only the accepted fullwidth-space markers beyond native list level five."""
+    result=[(depth,[])]
+    for run in runs:
+        if depth!=6 or 'text' not in run:
+            result[-1][1].append(run);continue
+        start=0
+        for marker in re.finditer(r'\n(\u3000{2,})• ',run['text']):
+            if len(marker[1])%2:raise ValueError('sync_overflow_indent_ambiguous')
+            if marker.start()>start:result[-1][1].append({**run,'text':run['text'][start:marker.start()]})
+            result.append((depth+len(marker[1])//2,[]));start=marker.end()
+        if start<len(run['text']):result[-1][1].append({**run,'text':run['text'][start:]})
+    return result
+
 def rows_from_html(html):
     tree=OutlineTree();tree.feed(canonical_cards(html));tree.close()
     if len(tree.stack)!=1:raise ValueError('sync_unbalanced_html')
@@ -59,7 +73,11 @@ def rows_from_html(html):
     offset=1 if has_heading(tree.root) else 0
     rows=[];gaps=[]
     def add(n,depth,kind):
-        runs=inline(n.children if kind!='card' else [n]);ai=False
+        runs=inline(n.children if kind!='card' else [n])
+        for row_depth,row_runs in overflow_rows(runs,depth) if kind=='item' else [(depth,runs)]:
+            add_runs(row_runs,row_depth,kind)
+    def add_runs(runs,depth,kind):
+        ai=False
         if runs and runs[0].get('type')=='math' and runs[0]['tex']==AI_TEX:
             runs=runs[1:];ai=True
             if runs and 'text' in runs[0]:runs[0]['text']=runs[0]['text'].lstrip(' ')
@@ -136,6 +154,10 @@ def plan_article(source,remote_body):
               'contentChanged':content_changed,'parentChanged':old is not None and parent!=old['parentRemId']}
         if not old or content_changed or item['parentChanged']:changes.append(item)
         nodes.append(item)
+    for parent in {n['parentId'] for n in nodes}:
+        retained=[n['id'] for n in nodes if n['parentId']==parent and n['oldId'] and not n['parentChanged']]
+        original_order=[n['remId'] for n in local if n['remId'] in set(retained)]
+        if retained!=original_order:raise ValueError('sync_sibling_reorder_requires_review')
     blank_intents=[]
     original=source['nodes']
     for gap_at,gap_count in Counter(gaps).items():

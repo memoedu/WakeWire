@@ -1,7 +1,7 @@
 """JSON-only directional synchronization helpers; credentials never leave the local client."""
 import importlib.util,json,re,sys
 from pathlib import Path
-from zhihu_sync_model import plan_article
+from zhihu_sync_model import plan_article,rows_from_html
 from zhihu_article_format import normalize,format_structure
 
 spec=importlib.util.spec_from_file_location('sync_adapter',Path(__file__).with_name('zhihu-client.py'))
@@ -45,6 +45,9 @@ def main(request):
             raise ValueError('sync_original_identity_lost')
         plan=article_plan(source,request['article'])
         if plan['changes']:raise ValueError('sync_readback_content_or_hierarchy_mismatch')
+        rendered=adapter.prepare_layout(source['nodes'],ai_generated_tag_rem_id=source.get('aiGeneratedTagRemId'))['html']
+        _,expected_gaps=rows_from_html(rendered)
+        if expected_gaps!=plan['remoteGaps']:raise ValueError('sync_readback_blank_render_mismatch')
         for gap in plan['blankIntents']:
             siblings=[n['remId'] for n in source['nodes'] if n.get('parentRemId')==gap['parentId']]
             if siblings.index(gap['id'])!=siblings.index(gap['beforeId'])-1:raise ValueError('sync_readback_blank_position_mismatch')

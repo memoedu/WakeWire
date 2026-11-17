@@ -1,6 +1,7 @@
 import sys,unittest
 from pathlib import Path
 from zhihu_sync_model import plan_article,rows_from_html
+from zhihu_outline_overflow import overflow_spaces
 
 def source(rows):
     return {'remId':'root','fingerprint':'frozen','nodes':[{'remId':'root','text':'Title','depth':0}]+[{'remId':rid,'parentRemId':parent,'depth':depth,'text':text,'richText':[{'text':text}]} for rid,parent,depth,text in rows]}
@@ -52,5 +53,27 @@ class SyncModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'replacement_character'):
             plan_article(old,'<ul><li>��续投入生产</li></ul>')
 
+
+    def test_overflow_indent_roundtrip_restores_depth_and_rich_text(self):
+        html='<h2>Heading</h2>'+''.join('<ul><li>'+text+'</li>' for text in [
+            'Second level','Third level','Fourth level','Fifth level','Sixth level',
+            '<u>Seventh level</u>','<b>Eighth level</b><br/>Second line <a href="https://example.org">Reference</a><img eeimg="1" alt="x^2"/>'
+        ])+'</ul>'*7
+        expected,gaps=rows_from_html(html)
+        actual,actual_gaps=rows_from_html(overflow_spaces(html))
+        self.assertEqual([r['depth'] for r in actual],list(range(1,9)))
+        self.assertEqual(actual,expected)
+        self.assertEqual(actual_gaps,gaps)
+    def test_unapplied_sibling_reorder_is_not_reported_as_verified(self):
+        old=source([('a','root',1,'First clause'),('b','root',1,'Second clause')])
+        with self.assertRaisesRegex(ValueError,'sibling_reorder'):
+            plan_article(old,'<ul><li>Second clause</li><li>First clause</li></ul>')
+    def test_generated_ai_marker_in_overflow_is_not_source_formula(self):
+        html='<h2>Heading</h2>'+''.join('<ul><li>'+text+'</li>' for text in [
+            'Second','Third','Fourth','Fifth','Sixth','<img eeimg="1" alt="\\color{#7040a0}{\\text{AI}}"/> Seventh'
+        ])+'</ul>'*6
+        expected,_=rows_from_html(html);actual,_=rows_from_html(overflow_spaces(html))
+        self.assertEqual(actual,expected)
+        self.assertTrue(actual[-1]['aiPrefix'])
 
 if __name__=='__main__':unittest.main()
