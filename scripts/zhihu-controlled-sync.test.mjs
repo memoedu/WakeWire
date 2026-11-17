@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {auditControlled,publishControlled,seedControlled,hookFailureCode} from './zhihu-controlled-sync.mjs';
+import {auditControlled,publishControlled,seedControlled,hookFailureCode,retrySyncRead} from './zhihu-controlled-sync.mjs';
 import * as runtime from '../src/workflows/remnote-zhihu.ts';
 import {articleFeedback} from '../src/workflows/remnote-zhihu-review.ts';
 const {snapshotArticle}=runtime;
@@ -43,6 +43,27 @@ async function fixture(){
 }
 
 describe('controlled article sync ownership and recovery',()=>{
+ it('retries a transient read only once and does not retry login or semantic failures',async()=>{
+  let calls=0,pauses=0;const pause=async()=>{pauses++;};
+  expect(await retrySyncRead(async()=>{if(calls++===0)throw Error('Zhihu client failed: HTTPError');return 'current';},pause)).toBe('current');
+  expect(calls).toBe(2);expect(pauses).toBe(1);
+  for(const message of ['Zhihu client failed: LoginError','sync_same_node_conflict']){
+   calls=0;await expect(retrySyncRead(async()=>{calls++;throw Error(message);},pause)).rejects.toThrow(message);expect(calls).toBe(1);
+  }
+ });
+ it('recovers a transient full source scan without any mutation',async()=>{
+  const o=await fixture();o.readPause=async()=>{};o.decision={direction:'none'};const read=o.reader.read;let calls=0;
+  o.reader.read=async id=>{if(id==='doc'&&calls++===0)throw Error('remnote_read_note: MCP request failed');return read(id);};
+  expect((await auditControlled(o)).issues).toBe(0);expect(calls).toBe(2);expect(o.calls.create).toBe(0);expect(o.calls.apply).toBe(0);
+ });
+ it('retries article and source reads but never repeats an uncertain draft write',async()=>{
+  const o=await fixture();o.readPause=async()=>{};const model=o.publisher.syncModel,read=o.reader.read;let gets=0,native=0;
+  o.publisher.syncModel=async(action,args)=>{if(action==='read-article'&&gets++===0)throw Error('Zhihu client failed: HTTPError');return model(action,args);};
+  o.reader.read=async id=>{if(id==='body'&&native++===0)throw Error('remnote_read_note: MCP request failed');return read(id);};
+  o.publisher.writeDraft=async()=>{o.calls.write++;throw Error('Zhihu client failed: HTTPError');};
+  expect((await auditControlled(o)).issues).toBe(1);expect(o.calls.write).toBe(1);expect(o.sync.revisions['123'].stage).toBe('writing');
+  await auditControlled(o);expect(o.calls.write).toBe(1);expect(o.state.syncFeedback.articles[0].issues).toEqual(['sync_unknown_revision_result']);
+ });
  it('classifies a failed RemNote hook without exposing an upstream response or credential',()=>{
   expect(hookFailureCode(Error('remnote_read_note: MCP request timed out'))).toBe('remnote_timeout');
   expect(hookFailureCode(Error('RemNote knowledge base changed'))).toBe('remnote_knowledge_base_changed');
