@@ -30,7 +30,7 @@ export function underlineSnapshotContent(
 ): Array<Record<string, unknown>> {
   if (
     native.length > 1000 ||
-    !native.some((p) => p && typeof p === "object" && "u" in p && p.u === true)
+    !native.some((p) => p && typeof p === "object" && "u" in p && typeof p.u === "boolean")
   )
     throw Error("native underline snapshot is unavailable");
   let size = 0;

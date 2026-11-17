@@ -39,6 +39,9 @@ describe("native underline reads", () => {
         ),
       ).toThrow();
     expect(() => underlineSnapshotContent([{ i: "m", text: "plain" }], [])).toThrow();
+    expect(underlineSnapshotContent([{ i: "m", text: "cleared", u: false }], [])).toEqual([
+      { text: "cleared" },
+    ]);
     expect(() =>
       underlineSnapshotContent([{ i: "m", text: "link", u: true, url: "javascript:alert(1)" }], []),
     ).toThrow();

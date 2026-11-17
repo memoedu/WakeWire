@@ -99,7 +99,7 @@ export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
         throw new Error("native rich text identity changed");
       if (
         !node.nativeSnapshot.text.some(
-          (p) => p && typeof p === "object" && "u" in p && p.u === true,
+          (p) => p && typeof p === "object" && "u" in p && typeof p.u === "boolean",
         )
       )
         throw error;
