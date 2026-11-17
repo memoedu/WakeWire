@@ -194,7 +194,7 @@ def native_html(runs, refs):
             if re.search(r"\[\[[^\]]+\]\]", text):
                 raise ValueError("article_native_reference_unresolved")
             html = escape(text).replace("\r\n", "\n").replace("\n", "<br/>")
-            for mark, tag in (("code", "code"), ("italic", "em"), ("bold", "strong")):
+            for mark, tag in (("code", "code"), ("italic", "em"), ("bold", "strong"), ("underline", "u")):
                 if run.get(mark):
                     html = "<" + tag + ">" + html + "</" + tag + ">"
             result.append(html)
@@ -238,6 +238,9 @@ class StandaloneLink(HTMLParser):
             if self.href is not None or self.stack or "member_mention" in attributes.get("class", "").split():
                 self.valid = False
             self.href, self.inside = attributes.get("href", ""), True
+        if tag == "u" and self.inside:
+            # Card titles cannot retain an explicit underline; preserve the original link instead.
+            self.valid = False
         self.stack.append(tag)
 
     def handle_endtag(self, tag):
@@ -386,7 +389,7 @@ def normalize(html):
 
 class ArticleLayout(HTMLParser):
     """Compare visible layout, accepting both valid nested lists and Zhihu's list DOM."""
-    INLINE = {"strong", "em", "blockquote", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6"}
+    INLINE = {"strong", "em", "u", "blockquote", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)

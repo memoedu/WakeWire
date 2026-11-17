@@ -16,6 +16,42 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_native_underline_preserves_exact_ranges_and_composes_with_existing_marks(self):
+        nodes = [{"text": "Underline fixture", "depth": 0}, {"text": "Before marked text after", "depth": 1,
+                 "richText": [{"text": "Before "}, {"text": "marked text", "underline": True, "bold": True}, {"text": " after"}]}]
+        result = adapter.prepare(nodes, "待发布")
+        self.assertIn('Before <u><strong>marked text</strong></u> after', result['html'])
+        self.assertEqual(result['text'], 'Beforemarkedtextafter首次发布时间：待发布')
+        self.assertIn(['+u', 6], json.loads(result['format'])['styles'])
+        without = result['html'].replace('<u>', '').replace('</u>', '')
+        self.assertEqual(adapter.normalize(without), result['text'])
+        self.assertNotEqual(adapter.format_structure(without), result['format'])
+        moved = result['html'].replace('Before <u><strong>marked text</strong></u> after', '<u>Before </u><strong>marked text</strong> after')
+        self.assertNotEqual(adapter.format_structure(moved), result['format'])
+
+    def test_explicitly_underlined_link_does_not_lose_its_mark_in_a_card_title(self):
+        result = adapter.prepare([{"text": "Underlined link", "depth": 0}, {"text": "Independent underlined reference", "depth": 1,
+            "richText": [{"type": "link", "url": "https://example.org/ref", "children": [{"text": "Independent underlined reference", "underline": True}]}]}])
+        self.assertIn('<a href="https://example.org/ref"><u>Independent underlined reference</u></a>', result['html'])
+        self.assertNotIn('data-draft-type="link-card"', result['html'])
+
+    def test_cloud_readback_rejects_lost_underline_even_when_all_text_matches(self):
+        client = MagicMock()
+        html = '<p>Before <u>underlined words</u> after</p>'
+        expected = {'id': '915', 'authorId': 'author', 'title': 'Fixture', 'text': 'Oldbody', 'format': 'old', 'state': 'draft'}
+        saved = {**expected, 'text': adapter.normalize(html), 'format': adapter.format_structure(html.replace('<u>', '').replace('</u>', ''))}
+        client._session.patch.return_value.status_code = 200
+        with patch.object(adapter, 'read_draft', side_effect=[expected, saved]):
+            with self.assertRaisesRegex(ValueError, 'draft_readback_mismatch'):
+                adapter.write_draft(client, '915', 'Fixture', html, 'author', expected)
+        client._content_publish.assert_not_called()
+
+    def test_plain_underscores_are_not_reinterpreted_as_native_underline(self):
+        result = adapter.prepare([{'text': 'Literal underscore fixture', 'depth': 0},
+            {'text': 'snake_case and ordinary values remain plain', 'depth': 1, 'richText': [{'text': 'snake_case and ordinary values remain plain'}]}])
+        self.assertNotIn('<u>', result['html'])
+        self.assertNotIn('underline', result['html'])
+
     def test_standalone_reference_leaves_become_cards_but_prose_links_stay_inline(self):
         result = adapter.prepare([
             {"text": "Reference example", "depth": 0},

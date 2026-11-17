@@ -22,6 +22,7 @@ import {
   saveReviewDraft,
   scanArticles,
 } from "./remnote-zhihu.js";
+import { underlineSnapshotContent } from "./remnote-zhihu-native.js";
 import { archivePreparedArticles, publishPreparedArticles } from "./remnote-zhihu-publish.js";
 import { articleFeedback, auditArticles, reviewIssue } from "./remnote-zhihu-review.js";
 
@@ -75,9 +76,38 @@ export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
     }
   }
   async richText(remId: string): Promise<Array<Record<string, unknown>>> {
+    let raw: unknown;
+    try {
+      raw = await this.call("personalwebsite_richtext", { remId, preserveReferences: true });
+    } catch (error) {
+      const snapshot = z
+        .object({
+          complete: z.literal(true),
+          nodes: z.array(
+            z.object({
+              remId: z.string(),
+              inlineRefs: z
+                .array(z.object({ targetRemId: z.string(), text: z.string() }))
+                .optional(),
+              nativeSnapshot: z.object({ text: z.array(z.unknown()) }),
+            }),
+          ),
+        })
+        .parse(await this.call("personalwebsite_nodes", { remIds: [remId] }));
+      const node = snapshot.nodes[0];
+      if (snapshot.nodes.length !== 1 || node?.remId !== remId)
+        throw new Error("native rich text identity changed");
+      if (
+        !node.nativeSnapshot.text.some(
+          (p) => p && typeof p === "object" && "u" in p && typeof p.u === "boolean",
+        )
+      )
+        throw error;
+      return underlineSnapshotContent(node.nativeSnapshot.text, node.inlineRefs ?? []);
+    }
     const result = z
       .object({ remId: z.string(), content: z.array(z.record(z.string(), z.unknown())) })
-      .parse(await this.call("personalwebsite_richtext", { remId, preserveReferences: true }));
+      .parse(raw);
     if (result.remId !== remId) throw new Error("native rich text identity changed");
     return result.content;
   }
