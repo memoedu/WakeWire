@@ -239,6 +239,11 @@ export function articleFeedback(state: ArticleState, now: Date, phase: string, s
 }
 
 function syncIssue(code: string): string {
+  if (/remnote_(?:timeout|unavailable)/u.test(code))
+    return "RemNote 读取在有限重试后仍失败，原稿未改动，等待连接恢复后重新检查。";
+  if (/zhihu_read_failed/u.test(code))
+    return "知乎读取在有限重试后仍失败，原文和草稿未改动，等待后续检查。";
+  if (/zhihu_login_required/u.test(code)) return "知乎登录态未通过核验，原文和草稿已保留。";
   if (/settings|columns/.test(code))
     return "原文的封面、评论或专栏等设置暂不能保真更新，已保留原文。";
   if (/same_node/.test(code)) return "两端修改了同一个节点，请选择或合并双方内容。";

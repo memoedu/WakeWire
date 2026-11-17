@@ -6,13 +6,26 @@ import assert from 'node:assert/strict';
 
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const atom=(a,b)=>a.title===b.title&&a.text===b.text&&a.format===b.format&&a.tableOfContents===b.tableOfContents;
+/** Bounded retry is used only for reads, never for a native write or publication. */
+export async function retrySyncRead(read,pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))){
+ for(let attempt=0;attempt<2;attempt++){
+  try{return await read();}
+  catch(error){
+   const message=error instanceof Error?error.message:'';
+   const transient=/MCP request failed|MCP.*timed out|remnote_.*(?:timeout|request failed)|Zhihu client (?:failed: (?:HTTPError|ConnectionError|Timeout|ReadTimeout)|timed out)/i.test(message);
+   if(!transient||attempt)throw error;
+   await pause(2000);
+  }
+ }
+}
 export async function auditControlled(o){
  const {snapshotArticle,scanArticles,validateArticle}=o.runtime??await import('../dist/workflows/remnote-zhihu.js');
  const {state,sync,publisher,reader,cfg,slot}=o;
  sync.revisions??={};sync.operations??={};sync.articles??={};sync.drafts??={};
  const reports=[];
+ const readOnly=read=>retrySyncRead(read,o.readPause);
  const report=(id,title,status,issue,draftId)=>reports.push({articleId:id,sourceRemId:entries.find(e=>e.id===id)?.source.remId,title,status,issues:issue?[issue]:[],publicationSlot:slot,...(draftId?{editorUrl:`https://zhuanlan.zhihu.com/p/${draftId}/edit`}:{}),url:`https://zhuanlan.zhihu.com/p/${id}`});
- const eligible=new Set((await scanArticles(reader,cfg.documentRemId,cfg.publishedTagRemId,cfg.aiGeneratedTagRemId)).sources.map(s=>s.remId));
+ const eligible=new Set((await readOnly(()=>scanArticles(reader,cfg.documentRemId,cfg.publishedTagRemId,cfg.aiGeneratedTagRemId))).sources.map(s=>s.remId));
  const completed=new Set(state.receipts.map(r=>r.source.remId));
  const entries=[...state.receipts.filter(r=>['verified','archived'].includes(r.stage)).map(r=>({id:r.articleId,source:r.source,published:true,receipt:r})),
   ...(state.drafts??[]).filter(d=>d.draftId&&d.status!=='published'&&!completed.has(d.source.remId)&&d.reviewMode==='automatic'&&eligible.has(d.source.remId)).map(d=>({id:d.draftId,source:d.source,published:false,draft:d}))];
@@ -20,9 +33,9 @@ export async function auditControlled(o){
   let title=item.source.nodes[0].text;
   try{
    if(sync.operations[item.id])throw Error('sync_pending_operation_requires_review');
-   if(['submitting','published'].includes(sync.revisions[item.id]?.stage))throw Error('sync_unknown_revision_result');
+   if(['creating','writing','submitting','published'].includes(sync.revisions[item.id]?.stage))throw Error('sync_unknown_revision_result');
    let base=item.published?sync.articles[item.id]:sync.drafts[item.source.remId];
-   const remote=await publisher.syncModel('read-article',{id:item.id,draft:!item.published});
+   const remote=await readOnly(()=>publisher.syncModel('read-article',{id:item.id,draft:!item.published}));
    assert.equal(remote.state,item.published?'published':'draft');assert.equal(remote.author.id,cfg.accountId);
    if(!base){
     // Bootstrap from the last verified workflow snapshot, never from an unchecked live source.
@@ -42,7 +55,7 @@ export async function auditControlled(o){
     baselineArticle={id:item.id,title:prepared.title,content:prepared.html,author:{id:cfg.accountId},state:'draft'};
     base.articleBaseline=baselineArticle;o.saveSync();
    }
-   let source=await snapshotArticle(reader,item.source.remId,Boolean(item.source.tagTrigger),cfg.aiGeneratedTagRemId,true);
+   let source=await readOnly(()=>snapshotArticle(reader,item.source.remId,Boolean(item.source.tagTrigger),cfg.aiGeneratedTagRemId,true));
    if(item.source.tagTrigger)source.tagTrigger=item.source.tagTrigger;
    const decision=await publisher.syncModel('reconcile',{baselineSource:base.sourceBaseline,source,baselineArticle,article:remote});
    if(decision.direction==='conflict')throw Error(decision.code);
@@ -119,7 +132,8 @@ export async function auditControlled(o){
     delete sync.operations[item.id];o.saveSync();report(item.id,title,'revision-approved',undefined,revision.previewId);
    }
   }catch(error){
-   const code=error instanceof Error&&/^[A-Za-z_]+$/.test(error.message)?error.message:'sync_format_or_connection_requires_review';
+   const code=error instanceof Error&&/^[A-Za-z_]+$/.test(error.message)?error.message:
+    sync.operations[item.id]||['creating','writing'].includes(sync.revisions[item.id]?.stage)?'sync_pending_operation_requires_review':'sync_'+hookFailureCode(error);
    const revision=sync.revisions[item.id];if(revision?.stage==='approved')revision.stage='blocked';
    // A conflicted source cannot retain a prior approval for a new publication.
    if(item.draft&&item.draft.status==='ready'){item.draft.status='review';item.draft.reviewMode='automatic';}
@@ -212,6 +226,8 @@ export function hookFailureCode(error){
  const message=error instanceof Error?error.message:'';
  if(/knowledge base/i.test(message))return 'remnote_knowledge_base_changed';
  if(/RemNote|MCP|remnote_/i.test(message))return /timeout|timed out/i.test(message)?'remnote_timeout':'remnote_unavailable';
+ if(/^Zhihu client failed: (?:LoginError|cookie_snapshot_stale|zhihu_account_changed|account_changed)$/i.test(message))return 'zhihu_login_required';
+ if(/^Zhihu client (?:failed: (?:HTTPError|ConnectionError|Timeout|ReadTimeout)|timed out)/i.test(message))return 'zhihu_read_failed';
  if(/^sync_[a-z_]{1,80}$/.test(message))return message;
  return 'hook_failed';
 }
