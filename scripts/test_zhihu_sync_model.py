@@ -64,6 +64,10 @@ class SyncModelTests(unittest.TestCase):
         self.assertEqual([r['depth'] for r in actual],list(range(1,9)))
         self.assertEqual(actual,expected)
         self.assertEqual(actual_gaps,gaps)
+    def test_unapplied_sibling_reorder_is_not_reported_as_verified(self):
+        old=source([('a','root',1,'First clause'),('b','root',1,'Second clause')])
+        with self.assertRaisesRegex(ValueError,'sibling_reorder'):
+            plan_article(old,'<ul><li>Second clause</li><li>First clause</li></ul>')
     def test_generated_ai_marker_in_overflow_is_not_source_formula(self):
         html='<h2>Heading</h2>'+''.join('<ul><li>'+text+'</li>' for text in [
             'Second','Third','Fourth','Fifth','Sixth','<img eeimg="1" alt="\\color{#7040a0}{\\text{AI}}"/> Seventh'

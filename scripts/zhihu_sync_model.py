@@ -154,6 +154,10 @@ def plan_article(source,remote_body):
               'contentChanged':content_changed,'parentChanged':old is not None and parent!=old['parentRemId']}
         if not old or content_changed or item['parentChanged']:changes.append(item)
         nodes.append(item)
+    for parent in {n['parentId'] for n in nodes}:
+        retained=[n['id'] for n in nodes if n['parentId']==parent and n['oldId'] and not n['parentChanged']]
+        original_order=[n['remId'] for n in local if n['remId'] in set(retained)]
+        if retained!=original_order:raise ValueError('sync_sibling_reorder_requires_review')
     blank_intents=[]
     original=source['nodes']
     for gap_at,gap_count in Counter(gaps).items():

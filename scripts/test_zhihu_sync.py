@@ -30,5 +30,14 @@ class SyncHelperTests(unittest.TestCase):
         _,article=fixture();changed=copy.deepcopy(article);changed['content']=changed['content'].replace('Body','Author edit')
         with self.assertRaisesRegex(ValueError,'changed_during_planning'):
             main({'action':'assert-published','before':article,'article':changed})
+    def test_removed_visible_blank_is_not_a_successful_readback(self):
+        source,article=fixture()
+        source['nodes'][1].update(text='An independently checked body',richText=[{'text':'An independently checked body'}])
+        article['content']=article['content'].replace('Body','An independently checked body')
+        source['nodes'] += [{'remId':'gap','parentRemId':'root','depth':1,'text':'','richText':[]},
+            {'remId':'tail','parentRemId':'root','depth':1,'text':'Tail','richText':[{'text':'Tail'}]}]
+        article['content']=article['content'].replace('</li>','</li><li>Tail</li>',1)
+        with self.assertRaisesRegex(ValueError,'blank_render'):
+            main({'action':'verify','source':source,'before':source,'article':article})
 
 if __name__=='__main__':unittest.main()
