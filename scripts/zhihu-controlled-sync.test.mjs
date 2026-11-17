@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {auditControlled,publishControlled,seedControlled} from './zhihu-controlled-sync.mjs';
+import {auditControlled,publishControlled,seedControlled,hookFailureCode} from './zhihu-controlled-sync.mjs';
 import * as runtime from '../src/workflows/remnote-zhihu.ts';
 import {articleFeedback} from '../src/workflows/remnote-zhihu-review.ts';
 const {snapshotArticle}=runtime;
@@ -43,6 +43,21 @@ async function fixture(){
 }
 
 describe('controlled article sync ownership and recovery',()=>{
+ it('classifies a failed RemNote hook without exposing an upstream response or credential',()=>{
+  expect(hookFailureCode(Error('remnote_read_note: MCP request timed out'))).toBe('remnote_timeout');
+  expect(hookFailureCode(Error('RemNote knowledge base changed'))).toBe('remnote_knowledge_base_changed');
+  expect(hookFailureCode(Error('HTTP response body credential-value'))).toBe('hook_failed');
+  expect(hookFailureCode(Error('some_private_value'))).toBe('hook_failed');
+ });
+ it('does not scan a stale ready record again after its source already has a publication receipt',async()=>{
+  const o=await fixture();o.nodes.get('root').parentRemId='doc';o.nodes.get('root').title='%Original title';
+  o.state.drafts=[{source:o.state.receipts[0].source,draftId:'123',status:'ready',reviewMode:'automatic'}];
+  const result=await auditControlled(o);expect(result.checked).toBe(1);expect(result.issues).toBe(0);
+ });
+ it('keeps an external source tag route in the frozen revision snapshot',async()=>{
+  const o=await fixture();const route={triggerTagRemId:'doc',publishedTagRemId:'done'};o.state.receipts[0].source.tagTrigger=route;
+  await auditControlled(o);expect(o.sync.revisions['123'].source.tagTrigger).toEqual(route);
+ });
  it('stages a revision under a separate preview identity and reuses it on another audit',async()=>{
   const o=await fixture();await auditControlled(o);const r=o.sync.revisions['123'];
   expect(r.stage).toBe('approved');expect(r.previewId).not.toBe('123');expect(r.firstPublishedAt).toBe('2026.01.02 12:00');expect(r.seriesLabel).toBe('第3 篇 | day 2');

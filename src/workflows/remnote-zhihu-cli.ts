@@ -23,7 +23,11 @@ import {
   scanArticles,
 } from "./remnote-zhihu.js";
 import { underlineSnapshotContent } from "./remnote-zhihu-native.js";
-import { archivePreparedArticles, publishPreparedArticles } from "./remnote-zhihu-publish.js";
+import {
+  archivePreparedArticles,
+  preparedPublicationSummary,
+  publishPreparedArticles,
+} from "./remnote-zhihu-publish.js";
 import { articleFeedback, auditArticles, reviewIssue } from "./remnote-zhihu-review.js";
 
 const Config = z.object({
@@ -347,16 +351,27 @@ async function controlledHook(
           stop("sync_hook_output_invalid");
         }
       });
-      child.stderr.resume();
+      child.stderr.setEncoding("utf8");
+      let diagnostic = "";
+      child.stderr.on("data", (data: string) => {
+        if (diagnostic.length < 4096) diagnostic += data;
+      });
       child.on("error", () => {
         clearTimeout(timer);
         reject(new Error("sync_hook_failed"));
       });
       child.on("close", (code) => {
         clearTimeout(timer);
+        if (stopped) {
+          reject(new Error(stopped));
+          return;
+        }
+        if (code !== 0) {
+          const reason = /controlled_sync_failed:([a-z_]+)/u.exec(diagnostic)?.[1];
+          reject(new Error(reason ? `sync_${reason}` : "sync_hook_failed"));
+          return;
+        }
         try {
-          if (stopped) throw new Error(stopped);
-          if (code !== 0) throw new Error("sync_hook_failed");
           resolve(JSON.parse(output));
         } catch {
           reject(new Error("sync_hook_failed"));
@@ -561,17 +576,20 @@ async function main(): Promise<void> {
         }
         const report = () => {
           const finishedAt = new Date().toISOString();
+          const baseFeedback = articleFeedback(
+            state,
+            new Date(),
+            "publish",
+            publicationSlot(new Date()),
+          );
+          const blocking = result.blockingIssues ?? [];
           const feedback = {
-            ...articleFeedback(state, new Date(), "publish", publicationSlot(new Date())),
+            ...baseFeedback,
+            generalIssues: [...baseFeedback.generalIssues, ...blocking],
+            issues: baseFeedback.issues + blocking.length,
             publications: [...result.publications, ...(revision.updates ?? [])],
           };
-          const summary = revision.updated
-            ? `已定时更新原文章 ${revision.updated} 篇；新发布 ${result.published} 篇。`
-            : result.published || result.publications.length
-              ? `文章已发布并完成知乎回读。${result.archivePending ? `RemNote 归档待完成 ${result.archivePending} 篇，恢复连接后补做。` : "归档已完成。"}`
-              : result.archivePending
-                ? `已发布文章仍有 ${result.archivePending} 篇待归档。`
-                : "本次未发布新文章。";
+          const summary = preparedPublicationSummary(result, revision.updated ?? 0);
           const value = {
             at: finishedAt,
             finishedAt,

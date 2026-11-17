@@ -13,6 +13,7 @@ import {
 export function reviewIssue(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   for (const [pattern, label] of [
+    [/^sync_remnote/u, "RemNote 读取或连接失败，本轮同步与审核未完成，已保留既有草稿。"],
     [/^sync_/u, "双向同步存在待处理的冲突或格式问题，已保留双方内容，请查看同步反馈。"],
     [/knowledge base/u, "当前 RemNote 连接的是另一个知识库，目标文章库未连接。"],
     [/mention|profile_changed/u, "标准艾特的账号无法明确核验，请确认被提及者。"],

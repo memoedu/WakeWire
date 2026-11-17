@@ -12,7 +12,12 @@ import {
   type CloudDraft,
   snapshotArticle,
 } from "./remnote-zhihu.js";
-import { archivePreparedArticles, publishPreparedArticles } from "./remnote-zhihu-publish.js";
+import {
+  archivePreparedArticles,
+  preparedPublicationSummary,
+  publishPreparedArticles,
+  recoverPreparedPublications,
+} from "./remnote-zhihu-publish.js";
 import { articleFeedback } from "./remnote-zhihu-review.js";
 
 async function fixture() {
@@ -165,6 +170,119 @@ async function fixture() {
 }
 
 describe("prepared Zhihu publication without RemNote", () => {
+  it("recovers a submitted article before audit and closes the stale ready-draft state without reposting", async () => {
+    const f = await fixture();
+    const verify = f.publisher.verify.bind(f.publisher);
+    let unavailable = true;
+    f.publisher.verify = async (id) => {
+      if (unavailable) throw Error("article not published yet");
+      return verify(id);
+    };
+    await expect(publishPreparedArticles(f.options)).rejects.toThrow("article not published yet");
+    expect(f.posts()).toBe(1);
+    expect(f.state.drafts?.[0]?.status).toBe("ready");
+    unavailable = false;
+    const result = await archivePreparedArticles({
+      ...f.archive,
+      publisher: f.publisher,
+      accountId: "account",
+    });
+    expect(result.archived).toBe(1);
+    expect(f.state.receipts[0]?.stage).toBe("archived");
+    expect(f.state.drafts?.[0]?.status).toBe("published");
+    expect(f.posts()).toBe(1);
+  });
+  it("does not adopt a mismatching public article or remove its submission fence", async () => {
+    const f = await fixture();
+    await publishPreparedArticles(f.options);
+    const receipt = f.state.receipts[0];
+    if (!receipt) throw Error("missing receipt");
+    receipt.stage = "published";
+    f.cloud.text = "An author changed the public article";
+    await expect(recoverPreparedPublications(f.options)).rejects.toThrow("readback mismatch");
+    expect(receipt.stage).toBe("published");
+    expect(f.posts()).toBe(1);
+  });
+  it("describes recovered old publications separately from a blocked new draft", () => {
+    const summary = preparedPublicationSummary({
+      status: "blocked",
+      published: 0,
+      archived: 0,
+      blocked: 1,
+      archivePending: 1,
+      publications: [{ id: "old", title: "An older article", url: "https://example.org/old" }],
+    });
+    expect(summary).toContain("本次未发布新文章");
+    expect(summary).toContain("缺少本时段");
+    expect(summary).toContain("此前发布");
+    expect(summary).not.toMatch(/^文章已发布/u);
+  });
+  async function queued() {
+    const f = await fixture();
+    const draft = f.state.drafts?.[0];
+    if (!draft) throw Error("missing draft");
+    const source = structuredClone(draft.source);
+    source.remId = "other-source";
+    if (source.nodes[0]) source.nodes[0].remId = "other-source";
+    f.state.receipts.push({
+      ...draft,
+      source,
+      title: "Another article",
+      text: "Another published body",
+      slot: "2026-11-15T11:30+08:00",
+      stage: "archived",
+      articleId: "901",
+      columnId: "column",
+    });
+    f.options.now = new Date("2026-11-15T09:30:00Z");
+    return f;
+  }
+  it("carries a frozen automatic draft delayed by the one-article quota even when a later scan is unavailable", async () => {
+    const f = await queued();
+    f.state.reviewFailure = { at: "2026-11-15T07:31:00Z", issue: "RemNote read unavailable" };
+    expect((await publishPreparedArticles(f.options)).published).toBe(1);
+    expect(f.state.reviews?.at(-1)).toMatchObject({
+      slot: "2026-11-15T17:30+08:00",
+      carriedFromSlot: "2026-11-15T11:30+08:00",
+      checkedAt: "2026-11-15T01:30:00Z",
+    });
+    expect(f.posts()).toBe(1);
+  });
+  it("does not carry an expired approval without proof that another article consumed its slot", async () => {
+    const f = await fixture();
+    f.options.now = new Date("2026-11-15T09:30:00Z");
+    const result = await publishPreparedArticles(f.options);
+    expect(result.status).toBe("blocked");
+    expect(result.blockingIssues?.[0]).toContain("缺少");
+    expect(f.posts()).toBe(0);
+  });
+  it("does not carry over a newer explicit blocked or withdrawn review", async () => {
+    for (const status of ["blocked", "withdrawn"] as const) {
+      const f = await queued();
+      const old = f.state.reviews?.[0];
+      if (!old) throw Error("missing approval");
+      f.state.reviews?.push({
+        ...old,
+        status,
+        slot: "2026-11-15T17:30+08:00",
+        checkedAt: "2026-11-15T07:30:00Z",
+        issues: ["Author review required"],
+      });
+      expect((await publishPreparedArticles(f.options)).published).toBe(0);
+      expect(f.posts()).toBe(0);
+    }
+  });
+  it("still preserves cloud edits and manual review boundaries when carrying a queued draft", async () => {
+    const f = await queued();
+    f.cloud.text = "An author edited the pending cloud draft";
+    await expect(publishPreparedArticles(f.options)).rejects.toThrow("author edits");
+    expect(f.posts()).toBe(0);
+    expect(f.state.reviews).toHaveLength(1);
+    const manual = await queued();
+    if (manual.state.drafts?.[0]) delete manual.state.drafts[0].reviewMode;
+    expect((await publishPreparedArticles(manual.options)).published).toBe(0);
+    expect(manual.posts()).toBe(0);
+  });
   it("persists the expected catalog state and blocks unknown-result replay when it is lost", async () => {
     for (const catalogSaved of [true, false]) {
       const f = await fixture();
