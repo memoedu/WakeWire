@@ -76,6 +76,9 @@ export async function publishPreparedArticles(options: {
     (d) =>
       d.status === "ready" &&
       d.draftId &&
+      !state.syncFeedback?.articles.some(
+        (r) => r.sourceRemId === d.source.remId && r.status === "blocked",
+      ) &&
       !completed.has(d.source.remId) &&
       (!manual || d.source.remId === manual),
   );

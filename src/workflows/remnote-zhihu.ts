@@ -63,6 +63,21 @@ export interface ArticleState {
   previousDrafts?: ArticleDraft[];
   reviews?: ArticleReview[];
   reviewFailure?: { at: string; issue: string };
+  syncFeedback?: {
+    updatedAt: string;
+    phase: string;
+    issues: number;
+    articles: Array<{
+      articleId: string;
+      sourceRemId?: string;
+      title: string;
+      status: string;
+      issues: string[];
+      publicationSlot?: string;
+      editorUrl?: string;
+      url?: string;
+    }>;
+  };
 }
 export interface ArticleReview {
   sourceRemId: string;

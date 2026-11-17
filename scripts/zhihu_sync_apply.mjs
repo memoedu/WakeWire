@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import {ArticleRemNoteMcp} from '../dist/workflows/remnote-zhihu-cli.js';
 import {snapshotArticle} from '../dist/workflows/remnote-zhihu.js';
-const configFile=process.argv[2],bundle=process.argv[3];
+export async function applySyncPlan(configFile,bundle,parentLock,emit=console.log){
 assert(configFile&&bundle&&path.isAbsolute(configFile)&&path.isAbsolute(bundle),'Absolute config and bundle paths are required');
 const dir=pathToFileURL(path.resolve(bundle)+path.sep);
 const read=name=>JSON.parse(fs.readFileSync(new URL(name,dir),'utf8'));
@@ -26,7 +26,8 @@ for(const p of plans){assert.equal(p.deletedIds,0);for(const row of p.changes)if
 class SyncReader extends ArticleRemNoteMcp{invoke(name,args){return this.call(name,args);}}
 const m=new SyncReader();
 const lock=path.join(path.dirname(configFile),'run.lock');
-const fd=fs.openSync(lock,'wx',0o600);fs.writeFileSync(fd,JSON.stringify({pid:process.pid,operation:'zhihu-pull-sync'}));fs.fsyncSync(fd);fs.closeSync(fd);
+if(parentLock){assert(Number.isSafeInteger(parentLock)&&parentLock>0);assert.equal(JSON.parse(fs.readFileSync(lock,'utf8')).pid,parentLock);process.kill(parentLock,0);}
+else{const fd=fs.openSync(lock,'wx',0o600);fs.writeFileSync(fd,JSON.stringify({pid:process.pid,operation:'zhihu-pull-sync'}));fs.fsyncSync(fd);fs.closeSync(fd);}
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 try{
  await m.connect(config.mcpUrl,config.knowledgeBaseId);
@@ -86,7 +87,7 @@ try{
     await m.invoke('remnote_move_note',{remId:id,newParentRemId:parentId,expectedOldParentRemId:current.parentRemId,position:anchor?'after':next?'before':'first',...(anchor||next?{siblingRemId:anchor??next}:{}),dryRun:false});
     const moved=await m.read(id);assert.equal(moved.parentRemId,parentId);journal.moves[id].stage='verified';save();
    }
-   console.log(JSON.stringify({articleId:p.articleId,remId:id,new:!row.oldId,contentChanged:row.contentChanged,moved:!row.oldId||row.parentChanged}));
+   emit(JSON.stringify({articleId:p.articleId,remId:id,new:!row.oldId,contentChanged:row.contentChanged,moved:!row.oldId||row.parentChanged}));
   }
   journal.blankMoves??={};
   for(const intent of p.blankIntents??[]){
@@ -109,5 +110,8 @@ try{
   }
  }
  journal.completedAt=new Date().toISOString();save();
- console.log(JSON.stringify({status:'pull-applied',created:Object.keys(journal.nodes).length,updated:Object.keys(journal.updates).length,movedExisting:plans.flatMap(p=>p.changes).filter(r=>r.oldId&&r.parentChanged).length,deleted:0}));
-}finally{await m.close();fs.unlinkSync(lock);}
+ emit(JSON.stringify({status:'pull-applied',created:Object.keys(journal.nodes).length,updated:Object.keys(journal.updates).length,movedExisting:plans.flatMap(p=>p.changes).filter(r=>r.oldId&&r.parentChanged).length,deleted:0}));
+}finally{await m.close();if(!parentLock)fs.unlinkSync(lock);}
+}
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)
+ await applySyncPlan(process.argv[2],process.argv[3],process.argv[4]==='--parent-lock'?Number(process.argv[5]):undefined);

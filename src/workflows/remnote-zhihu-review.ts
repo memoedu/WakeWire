@@ -13,6 +13,7 @@ import {
 export function reviewIssue(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   for (const [pattern, label] of [
+    [/^sync_/u, "双向同步存在待处理的冲突或格式问题，已保留双方内容，请查看同步反馈。"],
     [/knowledge base/u, "当前 RemNote 连接的是另一个知识库，目标文章库未连接。"],
     [/mention|profile_changed/u, "标准艾特的账号无法明确核验，请确认被提及者。"],
     [
@@ -94,6 +95,12 @@ export async function auditArticles(options: {
       issues: [],
     };
     try {
+      if (
+        state.syncFeedback?.articles.some(
+          (r) => r.sourceRemId === source.remId && r.status === "blocked",
+        )
+      )
+        throw new Error("sync_conflict_requires_review");
       const oldDraft = state.drafts?.find((d) => d.source.remId === source.remId);
       if (oldDraft && oldDraft.reviewMode !== "automatic" && oldDraft.status !== "published")
         throw new Error("manual review draft was preserved");
@@ -171,6 +178,14 @@ export async function auditArticles(options: {
 }
 
 export function articleFeedback(state: ArticleState, now: Date, phase: string, slot?: string) {
+  const syncEntries = (state.syncFeedback?.articles ?? []).filter(
+    (r) =>
+      r.status === "blocked" ||
+      (r.status === "revision-approved" && (!slot || r.publicationSlot === slot)),
+  );
+  const syncBlocked = new Set(
+    syncEntries.filter((r) => r.status === "blocked").map((r) => r.sourceRemId),
+  );
   const completed = new Set(
     state.receipts.filter((r) => r.stage !== "submitting").map((r) => r.source.remId),
   );
@@ -178,6 +193,7 @@ export function articleFeedback(state: ArticleState, now: Date, phase: string, s
     .filter(
       (r) =>
         !completed.has(r.sourceRemId) &&
+        !syncBlocked.has(r.sourceRemId) &&
         (r.status === "blocked" || (r.status === "approved" && (!slot || r.slot === slot))),
     )
     .map((r) => ({
@@ -198,13 +214,38 @@ export function articleFeedback(state: ArticleState, now: Date, phase: string, s
           : `《${r.title}》的既有发布记录尚未完成核验或归档，请先核对；系统不会重复发布。`,
       ),
   ];
-  const issues = articles.filter((r) => r.status === "blocked").length + generalIssues.length;
+  const synchronization = syncEntries.map((r) => ({
+    title: `${r.status === "revision-approved" ? "修订：" : ""}${r.title}`,
+    publicationSlot: r.publicationSlot,
+    checkedAt: state.syncFeedback?.updatedAt,
+    status: r.status === "blocked" ? "blocked" : "approved",
+    issues: r.issues.map((code) => syncIssue(code)),
+    ...(r.editorUrl ? { editorUrl: r.editorUrl } : {}),
+    ...(r.url ? { url: r.url } : {}),
+  }));
+  const issues =
+    articles.filter((r) => r.status === "blocked").length +
+    synchronization.filter((r) => r.status === "blocked").length +
+    generalIssues.length;
   return {
     updatedAt: now.toISOString(),
     phase,
     ...(slot ? { publicationSlot: slot } : {}),
-    articles,
+    articles: [...articles, ...synchronization],
     issues,
     generalIssues,
   };
+}
+
+function syncIssue(code: string): string {
+  if (/settings|columns/.test(code))
+    return "原文的封面、评论或专栏等设置暂不能保真更新，已保留原文。";
+  if (/same_node/.test(code)) return "两端修改了同一个节点，请选择或合并双方内容。";
+  if (/structure|sibling|blank/.test(code))
+    return "层级、节点顺序或空行存在无法安全合并的差异，请核对。";
+  if (/deletion/.test(code)) return "检测到删除或无法确认身份的替换，已保留原节点。";
+  if (/preview_edited/.test(code)) return "修订草稿已有人工修改，请核对修订版本。";
+  if (/pending|unknown/.test(code))
+    return "上次同步或修订结果尚未确认，已停止重放，等待核对原记录。";
+  return "同步格式、来源或连接核验未通过，双方内容已保留。";
 }

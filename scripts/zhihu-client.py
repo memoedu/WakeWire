@@ -316,6 +316,28 @@ def publish_in_column(client, title, html, column_id):
         raise ValueError("new_publish_draft_not_empty")
     return publish_saved_draft(client, created["id"], title, html, column_id, before["authorId"], before)
 
+def update_published(client, request, account_id):
+    article_id=request['articleId']
+    if not re.fullmatch(r'\d+',article_id):raise ValueError('invalid_article_id')
+    actual=client._get(f'https://zhuanlan.zhihu.com/api/articles/{article_id}')
+    before=request['expectedPublic']
+    if str(actual.get('id'))!=article_id or actual.get('author',{}).get('id')!=account_id or actual.get('state')!='published':
+        raise ValueError('revision_public_identity_changed')
+    if actual['title']!=before['title'] or normalize(actual['content'])!=normalize(before['content']) or format_structure(actual['content'])!=format_structure(before['content']) or catalog_setting(actual)!=catalog_setting(before):
+        raise ValueError('revision_public_changed')
+    # Preserve unsupported public settings by stopping instead of resetting them.
+    if actual.get('title_image') or actual.get('comment_permission') not in (None,'all') or actual.get('creation_statement'):
+        raise ValueError('revision_public_settings_require_review')
+    accepted={str(c.get('column',{}).get('url_token') or c.get('column',{}).get('id')) for c in actual.get('contributions',[]) if c.get('state')=='accepted'}
+    if accepted!={request['columnId']}:raise ValueError('revision_public_columns_require_review')
+    preview=read_draft(client,request['previewId'])
+    if preview['authorId']!=account_id or preview['state']!='draft' or any(preview[k]!=request['expectedPreview'][k] for k in ('title','text','format','tableOfContents')):
+        raise ValueError('revision_preview_changed')
+    if preview['title']!=request['title'] or preview['text']!=normalize(request['html']) or preview['format']!=format_structure(request['html']):
+        raise ValueError('revision_approval_changed')
+    validate_links(request['html'])
+    return publish_article_content(client,article_id,request['title'],request['html'],request['columnId'],is_published=True)
+
 
 def main(request):
     action = request["action"]
@@ -350,6 +372,8 @@ def main(request):
             return read_draft(client, request["articleId"])
         if action == "write-draft":
             return write_draft(client, request["articleId"], request["title"], request["html"], account["id"], request["expected"])
+        if action == 'update-published':
+            return update_published(client,request,account['id'])
         if action == "publish":
             if request.get("draftId"):
                 return publish_saved_draft(client, request["draftId"], request["title"], request["html"], request["columnId"], account["id"], request["expected"])

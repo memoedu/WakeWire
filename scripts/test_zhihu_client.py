@@ -17,6 +17,35 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def revision_fixture(self):
+        article={'id':'123','title':'Original title','content':'<p>Original independently checked body</p>','state':'published','author':{'id':'owner'},'comment_permission':'all','title_image':'','contributions':[{'state':'accepted','column':{'id':'col'}}]}
+        html='<p>A revised independently checked body</p>'
+        preview={'id':'999','authorId':'owner','state':'draft','title':'Original title','text':adapter.normalize(html),'format':adapter.format_structure(html),'tableOfContents':False}
+        request={'articleId':'123','previewId':'999','expectedPublic':article,'expectedPreview':preview,'title':'Original title','html':html,'columnId':'col'}
+        client=MagicMock();client._get.return_value=article
+        return client,request,preview
+    def test_verified_revision_targets_original_identity_without_creating_an_article(self):
+        client,request,preview=self.revision_fixture()
+        with patch.object(adapter,'read_draft',return_value=preview),patch.object(adapter,'publish_article_content',return_value={'id':'123'}) as publish:
+            self.assertEqual(adapter.update_published(client,request,'owner'),{'id':'123'})
+            self.assertEqual(publish.call_args.args[1],'123')
+            self.assertTrue(publish.call_args.kwargs['is_published'])
+            client._session.post.assert_not_called()
+    def test_public_revision_guard_blocks_concurrent_author_edits(self):
+        client,request,preview=self.revision_fixture();client._get.return_value={**request['expectedPublic'],'content':'<p>New author changes</p>'}
+        with patch.object(adapter,'publish_article_content') as publish:
+            with self.assertRaisesRegex(ValueError,'revision_public_changed'):adapter.update_published(client,request,'owner')
+            publish.assert_not_called()
+    def test_preview_revision_guard_blocks_changes_since_approval(self):
+        client,request,preview=self.revision_fixture()
+        with patch.object(adapter,'read_draft',return_value={**preview,'text':'Edited preview'}),patch.object(adapter,'publish_article_content') as publish:
+            with self.assertRaisesRegex(ValueError,'revision_preview_changed'):adapter.update_published(client,request,'owner')
+            publish.assert_not_called()
+    def test_revision_preserves_unsupported_existing_settings_by_stopping(self):
+        client,request,preview=self.revision_fixture();client._get.return_value={**request['expectedPublic'],'title_image':'https://example.org/cover.jpg'}
+        with patch.object(adapter,'publish_article_content') as publish:
+            with self.assertRaisesRegex(ValueError,'settings_require_review'):adapter.update_published(client,request,'owner')
+            publish.assert_not_called()
     def test_series_metadata_stays_in_footer_with_plain_title_and_original_body(self):
         nodes=[{'text':'A plain title','depth':0},{'text':'Original body','depth':1}]
         prepared=adapter.prepare(nodes,'待发布',series_label='第12 篇 | day 5')
