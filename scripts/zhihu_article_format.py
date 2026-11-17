@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from urllib.parse import quote, parse_qs, urlparse
 
 from markdown_it import MarkdownIt
+from zhihu_outline_overflow import overflow_spaces
 
 
 def compact(text):
@@ -590,13 +591,16 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
         flush()
         return "".join(result)
 
-    headings = max(node["depth"] for node in nodes if node["text"].strip()) > 5
+    max_depth = max(node["depth"] for node in nodes if node["text"].strip())
+    headings = max_depth > 5
     html = ("<p>" + ai_badge() + "</p>" if root["ai"] else "") + render_level(root["children"], headings)
     gaps = LiftGaps()
     gaps.feed(html)
     html = "".join(gaps.parts)
     while re.search(r"<(ul|ol)>\s*</\1>", html):
         html = re.sub(r"<(ul|ol)>\s*</\1>", "", html)
+    if max_depth > 6:
+        html = overflow_spaces(html)
     text = normalize(html)
     if not 9 <= len(text) <= 100000:
         raise ValueError("article_body_length")
@@ -607,4 +611,4 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
         text = normalize(html)
         if len(text) > 100000:
             raise ValueError("article_body_length")
-    return {"title": title, "html": html, "text": text, "format": format_structure(html), "hierarchyMode": "section-headings" if headings else "lists"}
+    return {"title": title, "html": html, "text": text, "format": format_structure(html), "hierarchyMode": "overflow-spaces" if max_depth > 6 else "section-headings" if headings else "lists"}

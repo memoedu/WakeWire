@@ -612,7 +612,10 @@ export function validateArticle(
   const maxDepth = Math.max(
     ...source.nodes.filter((node) => node.text.trim()).map((node) => node.depth),
   );
-  if (maxDepth > 5 && (maxDepth > 6 || prepared.hierarchyMode !== "section-headings"))
+  if (
+    (maxDepth === 6 && prepared.hierarchyMode !== "section-headings") ||
+    (maxDepth > 6 && prepared.hierarchyMode !== "overflow-spaces")
+  )
     throw new Error("Zhihu supports at most five list levels; source hierarchy requires review");
   if (!prepared.title.trim() || [...prepared.title].length > 100 || /[\r\n]/u.test(prepared.title))
     throw new Error("article title must be one line within 100 characters");

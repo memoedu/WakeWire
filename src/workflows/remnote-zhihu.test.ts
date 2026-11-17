@@ -15,6 +15,7 @@ import {
   scanArticles,
   seriesTitle,
   snapshotArticle,
+  validateArticle,
 } from "./remnote-zhihu.js";
 import { ArticleRemNoteMcp } from "./remnote-zhihu-cli.js";
 import { articleFeedback, auditArticles } from "./remnote-zhihu-review.js";
@@ -554,6 +555,27 @@ describe("RemNote to Zhihu publishing", () => {
     await expect(runArticles(f.options)).rejects.toThrow("five list levels");
     expect(f.posts()).toBe(0);
     expect(f.state.receipts).toHaveLength(0);
+  });
+  it("accepts deep sources only when the agreed overflow representation was prepared", async () => {
+    const f = fixture();
+    let parentRemId = "child";
+    for (let depth = 2; depth <= 8; depth++) {
+      const remId = `overflow-${depth}`;
+      f.nodes.set(remId, { remId, title: `Another source level ${depth}`, parentRemId });
+      parentRemId = remId;
+    }
+    const source = await snapshotArticle(f.remnote, "one");
+    const content = {
+      title: "Independent deep article",
+      text: "Complete independent article body",
+    };
+    expect(() => validateArticle(source, content, f.state)).toThrow("five list levels");
+    expect(() =>
+      validateArticle(source, { ...content, hierarchyMode: "section-headings" }, f.state),
+    ).toThrow("five list levels");
+    expect(() =>
+      validateArticle(source, { ...content, hierarchyMode: "overflow-spaces" }, f.state),
+    ).not.toThrow();
   });
   it("binds the AI tag into freshness checks without hashing unrelated completion tags", async () => {
     const f = fixture();

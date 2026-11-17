@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from zhihu_cli.client import ZhihuClient
+from zhihu_outline_overflow import overflow_spaces
 
 spec = importlib.util.spec_from_file_location("zhihu_adapter", Path(__file__).with_name("zhihu-client.py"))
 adapter = importlib.util.module_from_spec(spec)
@@ -16,6 +17,50 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_overflow_keeps_all_extra_levels_marks_and_native_sibling_return(self):
+        nodes = [{"text": "Independent deep outline", "depth": 0}, {"text": "Outer chapter", "depth": 1}]
+        nodes += [{"text": "Native level " + str(depth), "depth": depth} for depth in range(2, 7)]
+        nodes += [{"text": "Child link", "depth": 7, "richText": [{"type": "link", "url": "https://example.org/reference", "children": [{"text": "Child link", "underline": True}]}]},
+                  {"text": "Grandchild", "depth": 8, "richText": [{"text": "Grandchild", "bold": True}]},
+                  {"text": "$x^2$\nNext line", "depth": 9},
+                  {"text": "Overflow sibling", "depth": 7},
+                  {"text": "Native sibling", "depth": 6}]
+        result = adapter.prepare(nodes, "待发布")
+        self.assertEqual(result['hierarchyMode'], 'overflow-spaces')
+        self.assertIn('<br/>　　• <a href="https://example.org/reference"><u>Child link</u></a>', result['html'])
+        self.assertIn('<br/>　　　　• <strong>Grandchild</strong>', result['html'])
+        self.assertIn('<br/>　　　　　　• <img ', result['html'])
+        self.assertRegex(result['html'], r'<br\s*/>\s*Next line<br/>　　• Overflow sibling</li><li>Native sibling</li>')
+        layout = json.loads(result['format'])
+        self.assertEqual(max(b['depth'] for b in layout['blocks']), 5)
+        self.assertEqual(sum(s[0] == 'math' for s in layout['styles']), 1)
+        self.assertEqual(layout['blocks'][-3]['text'], 'Nativesibling')
+
+    def test_overflow_indent_spaces_bullets_and_breaks_are_part_of_readback(self):
+        nodes = [{"text": "Overflow comparison", "depth": 0}]
+        nodes += [{"text": "Level " + str(depth), "depth": depth} for depth in range(1, 8)]
+        result = adapter.prepare(nodes)
+        for changed in (result['html'].replace('　　• ', '• '),
+                        result['html'].replace('　　• ', '　• '),
+                        result['html'].replace('　　• ', '　　◦ '),
+                        result['html'].replace('<br/>　　• ', '　　• ')):
+            self.assertNotEqual(adapter.format_structure(changed), result['format'])
+        self.assertNotEqual(adapter.normalize(result['html'].replace('　　• ', '• ')), result['text'])
+
+    def test_overflow_transform_leaves_shallow_html_byte_identical(self):
+        html = '<h2>A &amp; B</h2><ul><li><b>Normal</b><br/>line</li><ul><li><u>Detail</u></li></ul></ul><p><br/></p>'
+        self.assertEqual(overflow_spaces(html), html)
+
+    def test_overflow_transform_supports_conventional_nested_li(self):
+        html = '<ul><li>A<ul><li>B<ul><li><u>C</u></li></ul></li></ul></li></ul>'
+        self.assertIn('<li>B<br/>　　• <u>C</u></li>', overflow_spaces(html, limit=2))
+
+    def test_overflow_orphan_and_unbalanced_structures_stay_blocked(self):
+        with self.assertRaisesRegex(ValueError, 'hierarchy_overflow_parent_missing'):
+            overflow_spaces('<ul><li>A</li><ul><ul><li>C</li></ul></ul></ul>', limit=2)
+        with self.assertRaisesRegex(ValueError, 'hierarchy_overflow_unbalanced'):
+            overflow_spaces('<ul><li>A</ul>')
+
     def test_native_underline_preserves_exact_ranges_and_composes_with_existing_marks(self):
         nodes = [{"text": "Underline fixture", "depth": 0}, {"text": "Before marked text after", "depth": 1,
                  "richText": [{"text": "Before "}, {"text": "marked text", "underline": True, "bold": True}, {"text": " after"}]}]
