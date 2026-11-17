@@ -13,8 +13,9 @@ export async function auditControlled(o){
  const reports=[];
  const report=(id,title,status,issue,draftId)=>reports.push({articleId:id,sourceRemId:entries.find(e=>e.id===id)?.source.remId,title,status,issues:issue?[issue]:[],publicationSlot:slot,...(draftId?{editorUrl:`https://zhuanlan.zhihu.com/p/${draftId}/edit`}:{}),url:`https://zhuanlan.zhihu.com/p/${id}`});
  const eligible=new Set((await scanArticles(reader,cfg.documentRemId,cfg.publishedTagRemId,cfg.aiGeneratedTagRemId)).sources.map(s=>s.remId));
+ const completed=new Set(state.receipts.map(r=>r.source.remId));
  const entries=[...state.receipts.filter(r=>['verified','archived'].includes(r.stage)).map(r=>({id:r.articleId,source:r.source,published:true,receipt:r})),
-  ...(state.drafts??[]).filter(d=>d.draftId&&d.status!=='published'&&d.reviewMode==='automatic'&&eligible.has(d.source.remId)).map(d=>({id:d.draftId,source:d.source,published:false,draft:d}))];
+  ...(state.drafts??[]).filter(d=>d.draftId&&d.status!=='published'&&!completed.has(d.source.remId)&&d.reviewMode==='automatic'&&eligible.has(d.source.remId)).map(d=>({id:d.draftId,source:d.source,published:false,draft:d}))];
  for(const item of entries){
   let title=item.source.nodes[0].text;
   try{
@@ -42,6 +43,7 @@ export async function auditControlled(o){
     base.articleBaseline=baselineArticle;o.saveSync();
    }
    let source=await snapshotArticle(reader,item.source.remId,Boolean(item.source.tagTrigger),cfg.aiGeneratedTagRemId,true);
+   if(item.source.tagTrigger)source.tagTrigger=item.source.tagTrigger;
    const decision=await publisher.syncModel('reconcile',{baselineSource:base.sourceBaseline,source,baselineArticle,article:remote});
    if(decision.direction==='conflict')throw Error(decision.code);
    if(decision.direction==='none'){
@@ -55,6 +57,7 @@ export async function auditControlled(o){
     sync.operations[item.id]={stage:'pulling',bundle,sourceBefore:source,remote,decision:decision.direction};o.saveSync();
     await o.apply(decision.pullPlan,bundle);
     const fresh=await snapshotArticle(reader,source.remId,Boolean(source.tagTrigger),cfg.aiGeneratedTagRemId,true);
+    if(source.tagTrigger)fresh.tagTrigger=source.tagTrigger;
     assert(source.nodes.every(n=>fresh.nodes.some(f=>f.remId===n.remId)),'sync_original_identity_lost');
     if(decision.direction==='remote')await publisher.syncModel('verify',{source:fresh,before:source,article:remote});
     else{
@@ -205,4 +208,11 @@ async function main(){
  try{if(action==='audit')await reader.connect(cfg.mcpUrl,cfg.knowledgeBaseId);const result=action==='audit'?await auditControlled(options):action==='publish'?await publishControlled(options):await seedControlled(options);console.log(JSON.stringify(result));}
  finally{await reader.close();}
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(()=>{console.error('controlled_sync_failed');process.exitCode=1;});
+export function hookFailureCode(error){
+ const message=error instanceof Error?error.message:'';
+ if(/knowledge base/i.test(message))return 'remnote_knowledge_base_changed';
+ if(/RemNote|MCP|remnote_/i.test(message))return /timeout|timed out/i.test(message)?'remnote_timeout':'remnote_unavailable';
+ if(/^sync_[a-z_]{1,80}$/.test(message))return message;
+ return 'hook_failed';
+}
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(error=>{console.error('controlled_sync_failed:'+hookFailureCode(error));process.exitCode=1;});

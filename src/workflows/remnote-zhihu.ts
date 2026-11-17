@@ -89,6 +89,7 @@ export interface ArticleReview {
   editorUrl?: string;
   status: "approved" | "blocked" | "resolved" | "withdrawn";
   issues: string[];
+  carriedFromSlot?: string;
 }
 export interface CloudDraft {
   id: string;
