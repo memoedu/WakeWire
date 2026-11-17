@@ -182,10 +182,12 @@ export async function saveReviewDraft(options: {
     if (!draft.draftId)
       throw new Error("unknown draft creation result; automatic recreation blocked");
     cloud = await publisher.readDraft(draft.draftId);
-    const matches = (expected: Pick<CloudDraft, "title" | "text" | "format">) =>
+    const matches = (expected: Pick<CloudDraft, "title" | "text" | "format" | "tableOfContents">) =>
       cloud?.title === expected.title &&
       cloud.text === expected.text &&
-      cloud.format === expected.format;
+      cloud.format === expected.format &&
+      (expected.tableOfContents === undefined ||
+        cloud.tableOfContents === expected.tableOfContents);
     if (
       cloud.authorId !== options.accountId ||
       cloud.state !== "draft" ||
@@ -240,7 +242,8 @@ export async function saveReviewDraft(options: {
     saved.state !== "draft" ||
     saved.title !== prepared.title ||
     saved.text !== prepared.text ||
-    saved.format !== prepared.format
+    saved.format !== prepared.format ||
+    (prepared.tableOfContents !== undefined && saved.tableOfContents !== prepared.tableOfContents)
   )
     throw new Error("saved cloud draft readback mismatch");
   draft.editorUrl = saved.editorUrl;
@@ -761,6 +764,8 @@ export async function runArticles(options: {
         result.title !== receipt.title ||
         result.text !== receipt.text ||
         result.format !== receipt.format ||
+        (receipt.tableOfContents !== undefined &&
+          result.tableOfContents !== receipt.tableOfContents) ||
         !result.columnIds.includes(receipt.columnId) ||
         result.url !== `https://zhuanlan.zhihu.com/p/${receipt.articleId}`
       )
@@ -893,7 +898,9 @@ export async function runArticles(options: {
       cloud.authorId !== accountId ||
       cloud.title !== savedDraft.title ||
       cloud.text !== savedDraft.text ||
-      cloud.format !== savedDraft.format
+      cloud.format !== savedDraft.format ||
+      (savedDraft.tableOfContents !== undefined &&
+        cloud.tableOfContents !== savedDraft.tableOfContents)
     )
       throw new Error("cloud draft changed; preserve author edits before publication");
   }
@@ -1081,6 +1088,8 @@ export async function adoptPublishedArticle(options: {
     url: published.url,
     stage: "verified",
   };
+  if (published.tableOfContents === undefined) delete receipt.tableOfContents;
+  else receipt.tableOfContents = published.tableOfContents;
   state.receipts.push(receipt);
   options.save();
   await archiveArticle(remnote, options.documentRemId, receipt);
