@@ -340,16 +340,38 @@ interface RunReport {
   suppressedLegacy: Array<{ remId: string; deliveryId: string }>;
 }
 
+export function pendingRepairDisposition(
+  ids: string[],
+  readiness: {
+    ready: boolean;
+    readyIds?: string[];
+    blocked?: Array<{ remId: string; message: string }>;
+    error?: string;
+  },
+): { waiting: string[]; errors: Array<{ remId: string; message: string }> } {
+  const ready = new Set(readiness.readyIds ?? (readiness.ready ? ids : []));
+  const waiting = ids.filter((id) => !ready.has(id));
+  const waitingIds = new Set(waiting);
+  const message = readiness.error;
+  return {
+    waiting,
+    errors:
+      readiness.blocked?.filter(({ remId }) => waitingIds.has(remId)) ??
+      (message ? waiting.map((remId) => ({ remId, message })) : []),
+  };
+}
+
 export async function run(
   config: Config,
   configFile: string,
   dryRun = false,
   documentRemId?: string,
   pendingOnly = false,
+  onlyRemIds?: string[],
 ): Promise<RunReport> {
   const release = dryRun ? () => {} : commandLock(configFile);
   try {
-    return await runUnlocked(config, configFile, dryRun, documentRemId, pendingOnly);
+    return await runUnlocked(config, configFile, dryRun, documentRemId, pendingOnly, onlyRemIds);
   } finally {
     release();
   }
@@ -361,7 +383,9 @@ async function runUnlocked(
   dryRun: boolean,
   documentRemId?: string,
   pendingOnly = false,
+  onlyRemIds?: string[],
 ): Promise<RunReport> {
+  const selected = onlyRemIds ? new Set(onlyRemIds) : undefined;
   const report: RunReport = {
     startedAt: new Date().toISOString(),
     scanned: 0,
@@ -426,6 +450,10 @@ async function runUnlocked(
           const delivery = prior[0];
           if (delivery) {
             const batch = CommandBatchSchema.parse(delivery.event.payload.commandBatch);
+            if (selected && !batch.members.some((member) => selected.has(member.taskRemId))) {
+              report.pending.push(...selected);
+              continue;
+            }
             tasks.push({
               ...(batch.members[0] as TodoTask),
               sourceDeliveryId: delivery.sourceDeliveryId,
@@ -444,7 +472,10 @@ async function runUnlocked(
         const scan = await scanCommandSource(remnote, source, excluded, (scanned) =>
           console.log(JSON.stringify({ documentRemId: source.documentRemId, scanned })),
         );
-        const pendingItems = scan.tasks.filter((t) => t.trigger === "pending");
+        const candidates = selected
+          ? scan.tasks.filter((task) => selected.has(task.taskRemId))
+          : scan.tasks;
+        const pendingItems = candidates.filter((t) => t.trigger === "pending");
         let reservedIds: string[] = [];
         if (config.pendingRepairModule && config.pendingRepairConfig) {
           const { reserved } = await import(pathToFileURL(config.pendingRepairModule).href);
@@ -453,25 +484,22 @@ async function runUnlocked(
             remIds: pendingItems.map((t) => t.taskRemId),
           });
         }
-        if (!dryRun && pendingItems.length) {
+        const unready = new Set<string>();
+        const repairIds = pendingItems
+          .map((t) => t.taskRemId)
+          .filter((id) => !reservedIds.includes(id));
+        if (!dryRun && repairIds.length) {
           if (!config.pendingRepairModule || !config.pendingRepairConfig)
             throw new Error("pending repair adapter is not configured");
           const { ready } = await import(pathToFileURL(config.pendingRepairModule).href);
           const readiness = await ready({
             configFile: config.pendingRepairConfig,
-            remIds: pendingItems.map((t) => t.taskRemId),
+            remIds: repairIds,
           });
-          if (!readiness.ready) {
-            report.pending.push(...pendingItems.map((t) => t.taskRemId));
-            report.documents.push({
-              documentRemId: source.documentRemId,
-              title: source.title,
-              markedTasks: pendingItems.length,
-            });
-            if (readiness.error)
-              report.errors.push({ remId: source.documentRemId, message: readiness.error });
-            continue;
-          }
+          const { waiting, errors } = pendingRepairDisposition(repairIds, readiness);
+          for (const id of waiting) unready.add(id);
+          report.pending.push(...waiting);
+          report.errors.push(...errors);
         }
         report.scanned += scan.nodeCount;
         report.markedTasks += scan.tasks.length;
@@ -487,9 +515,10 @@ async function runUnlocked(
           })),
         );
         const eligible: TodoTask[] = [];
-        for (const task of scan.tasks) {
+        for (const task of candidates) {
           if (pendingOnly && task.trigger !== "pending") continue;
           if (reservedIds.includes(task.taskRemId)) continue;
+          if (unready.has(task.taskRemId)) continue;
           const legacy = await findLegacyReceipt(
             source,
             task.taskRemId,

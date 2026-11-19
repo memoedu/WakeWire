@@ -8,6 +8,24 @@ import {
   verifyCommandSource,
 } from "./remnote-command-sources.js";
 import { eventIdFor, type RemNode, type RemNoteReader, scanTodo } from "./remnote-todo.js";
+import { pendingRepairDisposition } from "./remnote-todo-cli.js";
+
+it("isolates unreviewed commands and maps repair failures only to the affected items", () => {
+  const ids = ["ready", "blocked", "waiting"];
+  expect(
+    pendingRepairDisposition(ids, {
+      ready: false,
+      readyIds: ["ready"],
+      blocked: [
+        { remId: "blocked", message: "independent review failed" },
+        { remId: "unrelated", message: "other document" },
+      ],
+    }),
+  ).toEqual({
+    waiting: ["blocked", "waiting"],
+    errors: [{ remId: "blocked", message: "independent review failed" }],
+  });
+});
 
 function fixture(): RemNoteReader {
   const nodes: RemNode[] = [
