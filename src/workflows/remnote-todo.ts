@@ -47,6 +47,7 @@ export interface TodoTask {
 
 export interface TodoReceipt {
   id: string;
+  detail?: string;
   status: string;
   threadId: string | null;
   turnId: string | null;

@@ -107,7 +107,11 @@ export function maintenanceBatch(tasks: TodoTask[]): TodoTask | undefined {
   };
 }
 
-async function fingerprint(remnote: RemNoteReader, taskRemId: string): Promise<string> {
+async function fingerprint(
+  remnote: RemNoteReader,
+  taskRemId: string,
+  numbered = true,
+): Promise<string> {
   const nodes = new Map<string, RemNode>();
   const visit = async (node: RemNode): Promise<void> => {
     if (nodes.has(node.remId)) throw new Error("cycle in batch member");
@@ -116,7 +120,21 @@ async function fingerprint(remnote: RemNoteReader, taskRemId: string): Promise<s
       if (!child.parentRemId || child.parentRemId === node.remId) await visit(child);
   };
   await visit(await remnote.read(taskRemId));
-  return fingerprintTaskNodes(nodes, taskRemId, undefined, true);
+  return fingerprintTaskNodes(nodes, taskRemId, undefined, numbered);
+}
+
+export async function verifyFrozenCommand(remnote: RemNoteReader, task: TodoTask): Promise<void> {
+  for (const member of task.commandBatch?.members ?? [task]) {
+    const live = await remnote.read(member.taskRemId);
+    if (
+      live.parentRemId !== member.parentRemId ||
+      live.title !== member.title ||
+      !member.subtreeFingerprint ||
+      (await fingerprint(remnote, member.taskRemId, Boolean(task.commandBatch))) !==
+        member.subtreeFingerprint
+    )
+      throw new Error("命令内容或待发送位置已变化，原回执保留，等待核对");
+  }
 }
 
 /** Idempotent recovery uses the immutable batch in the original delivery receipt. */

@@ -10,7 +10,12 @@ import { apiFetch } from "../client.js";
 import type { Route } from "../core/route.js";
 import { VERSION } from "../version.js";
 import { NativeProjectRegistry } from "./native-project.js";
-import { acknowledgeBatch, CommandBatchSchema, maintenanceBatch } from "./remnote-command-batch.js";
+import {
+  acknowledgeBatch,
+  CommandBatchSchema,
+  maintenanceBatch,
+  verifyFrozenCommand,
+} from "./remnote-command-batch.js";
 import { commandLock } from "./remnote-command-lock.js";
 import {
   type CommandSource,
@@ -51,6 +56,7 @@ export const ConfigSchema = z.object({
   maintenanceDocumentsFile: z.string().optional(),
   pendingRepairModule: z.string().optional(),
   pendingRepairConfig: z.string().optional(),
+  desktopDispatch: z.object({ module: z.string(), bridgeConfigFile: z.string() }).optional(),
   legacyReceipts: CommandSourceSchema.shape.legacyReceipts,
 });
 type Config = z.infer<typeof ConfigSchema>;
@@ -210,18 +216,22 @@ async function api<T>(endpoint: string, body?: unknown, method = "POST"): Promis
   return result.body;
 }
 
-async function verifyDaemon(): Promise<void> {
+async function verifyDaemon(requireSink = true): Promise<void> {
   const health = await api<{ version: string; adapter: { name: string; codexReachable: boolean } }>(
     "/api/health",
   );
   if (health.version !== VERSION)
     throw new Error("WakeWire installed client and running daemon versions differ");
-  if (health.adapter.name !== "codex-app-server" || !health.adapter.codexReachable) {
+  if (
+    requireSink &&
+    (health.adapter.name !== "codex-app-server" || !health.adapter.codexReachable)
+  ) {
     throw new Error("RemNote workflow requires a reachable codex-app-server sink");
   }
 }
 
 async function setup(config: Config, configFile: string): Promise<void> {
+  if (config.desktopDispatch) throw new Error("已使用桌面原生发送，旧 WakeWire 路由只用于核对历史");
   await verifyDaemon();
   if (config.appProjectId) {
     const registry = new NativeProjectRegistry(undefined, config.appOwnerThreadId);
@@ -285,14 +295,29 @@ async function setup(config: Config, configFile: string): Promise<void> {
   );
 }
 
-async function createDispatcher(config: Config): Promise<TodoDispatcher> {
+type DispatchOptions = {
+  sendOptions?: { model: string; effort: string; deliveryMode: string };
+  resumeOnly?: boolean;
+};
+type CommandDispatcher = TodoDispatcher & {
+  pending?(documentRemId: string): Promise<Array<{ task: TodoTask; receipt: TodoReceipt }>>;
+  advance?(id: string): Promise<void>;
+  acknowledge?(id: string): Promise<void>;
+  close?(): Promise<void>;
+};
+
+async function createDispatcher(
+  config: Config,
+  options: DispatchOptions = {},
+): Promise<CommandDispatcher> {
   const routeId = config.routeId;
   if (!routeId) throw new Error("run setup before scanning");
   const route = (await api<{ routes: Route[] }>("/api/routes")).routes.find(
     (candidate) => candidate.id === routeId,
   );
   if (
-    !route?.enabled ||
+    !route ||
+    (!route.enabled && !config.desktopDispatch) ||
     route.target.type !== "new-thread" ||
     route.target.worktree ||
     route.target.cwd !== config.cwd ||
@@ -306,7 +331,7 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
   ) {
     throw new Error("workflow route was disabled or changed; refusing to dispatch");
   }
-  return {
+  const legacy: TodoDispatcher = {
     async receipt(sourceDeliveryId) {
       const query = new URLSearchParams({ routeId, sourceDeliveryId, limit: "1" });
       const result = await api<{ deliveries: TodoReceipt[] }>(`/api/deliveries?${query}`);
@@ -321,6 +346,26 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
           ? { developerInstructions: task.developerInstructions }
           : {}),
       });
+    },
+  };
+  if (!config.desktopDispatch) return legacy;
+  const { module, bridgeConfigFile } = config.desktopDispatch;
+  if (!path.isAbsolute(module) || !path.isAbsolute(bridgeConfigFile))
+    throw new Error("desktop command dispatcher requires absolute local bindings");
+  const adapter = await import(pathToFileURL(module).href);
+  const desktop: CommandDispatcher = adapter.createDesktopDispatcher({
+    bridgeConfigFile,
+    workspace: config.cwd,
+    projectId: config.appProjectId,
+    sendOptions: options.sendOptions,
+  });
+  return {
+    ...desktop,
+    async receipt(id) {
+      return (await legacy.receipt(id)) ?? desktop.receipt(id);
+    },
+    async advance(id) {
+      if (!(await legacy.receipt(id))) await desktop.advance?.(id);
     },
   };
 }
@@ -368,10 +413,19 @@ export async function run(
   documentRemId?: string,
   pendingOnly = false,
   onlyRemIds?: string[],
+  options: DispatchOptions = {},
 ): Promise<RunReport> {
   const release = dryRun ? () => {} : commandLock(configFile);
   try {
-    return await runUnlocked(config, configFile, dryRun, documentRemId, pendingOnly, onlyRemIds);
+    return await runUnlocked(
+      config,
+      configFile,
+      dryRun,
+      documentRemId,
+      pendingOnly,
+      onlyRemIds,
+      options,
+    );
   } finally {
     release();
   }
@@ -384,6 +438,7 @@ async function runUnlocked(
   documentRemId?: string,
   pendingOnly = false,
   onlyRemIds?: string[],
+  options: DispatchOptions = {},
 ): Promise<RunReport> {
   const selected = onlyRemIds ? new Set(onlyRemIds) : undefined;
   const report: RunReport = {
@@ -401,17 +456,21 @@ async function runUnlocked(
     path.dirname(configFile),
     dryRun
       ? "last-scan.json"
-      : documentRemId
-        ? `last-immediate-${documentRemId}.json`
-        : "last-run.json",
+      : options.resumeOnly && documentRemId
+        ? `last-resumed-${documentRemId}.json`
+        : documentRemId
+          ? `last-immediate-${documentRemId}.json`
+          : "last-run.json",
   );
   const save = () =>
     fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   const remnote = new RemNoteMcp();
+  let openedDispatcher: CommandDispatcher | undefined;
   try {
-    await verifyDaemon();
+    await verifyDaemon(!config.desktopDispatch);
     await remnote.connect(config.mcpUrl);
-    const dispatcher = await createDispatcher(config);
+    const dispatcher = await createDispatcher(config, options);
+    openedDispatcher = dispatcher;
     const excluded = new Set<string>();
     const { sources, maintenance } = await commandSources(config, remnote);
     for (const source of sources) excluded.add(source.documentRemId);
@@ -432,7 +491,12 @@ async function runUnlocked(
           source,
           source.documentRemId !== config.documentRemId ? maintenance?.rootRemId : undefined,
         );
-        if (source.context || source.scope || config.pendingRepairModule) {
+        if (
+          source.context ||
+          source.scope ||
+          config.pendingRepairModule ||
+          config.desktopDispatch
+        ) {
           const query = new URLSearchParams({ documentRemId: source.documentRemId });
           const prior = (
             await api<{
@@ -447,27 +511,40 @@ async function runUnlocked(
           ).deliveries;
           if (prior.length > 1)
             throw new Error("multiple pending batches in one Document; review original receipts");
-          const delivery = prior[0];
-          if (delivery) {
-            const batch = CommandBatchSchema.parse(delivery.event.payload.commandBatch);
-            if (selected && !batch.members.some((member) => selected.has(member.taskRemId))) {
-              report.pending.push(...selected);
-              continue;
-            }
-            tasks.push({
-              ...(batch.members[0] as TodoTask),
-              sourceDeliveryId: delivery.sourceDeliveryId,
-              prompt: delivery.renderedPrompt,
-              commandBatch: batch,
-            });
+          const desktop = (await dispatcher.pending?.(source.documentRemId)) ?? [];
+          const resumed = prior
+            .map<TodoTask>((delivery) => {
+              const batch = CommandBatchSchema.parse(delivery.event.payload.commandBatch);
+              return {
+                ...(batch.members[0] as TodoTask),
+                sourceDeliveryId: delivery.sourceDeliveryId,
+                prompt: delivery.renderedPrompt,
+                commandBatch: batch,
+              };
+            })
+            .concat(desktop.map(({ task }) => task));
+          if (resumed.length) {
+            const matching = resumed.filter(
+              (task) =>
+                !selected ||
+                (task.commandBatch?.members ?? [task]).some((member) =>
+                  selected.has(member.taskRemId),
+                ),
+            );
+            if (selected && !matching.length) report.pending.push(...selected);
+            tasks.push(...matching);
             report.documents.push({
               documentRemId: source.documentRemId,
               title: source.title,
-              markedTasks: batch.members.length,
+              markedTasks: matching.reduce(
+                (count, task) => count + (task.commandBatch?.members.length ?? 1),
+                0,
+              ),
             });
             continue;
           }
         }
+        if (options.resumeOnly) continue;
         if (!dryRun) await ensureCommandBuckets(remnote, source.documentRemId);
         const scan = await scanCommandSource(remnote, source, excluded, (scanned) =>
           console.log(JSON.stringify({ documentRemId: source.documentRemId, scanned })),
@@ -557,16 +634,33 @@ async function runUnlocked(
     for (const task of dryRun ? [] : tasks) {
       await ensureQueued(dispatcher, task);
     }
-    const deadline = Date.now() + config.waitMinutes * 60_000;
+    const deadline = Date.now() + (config.desktopDispatch ? 1 : config.waitMinutes) * 60_000;
     let lastProgress = 0;
     while (pending.size && Date.now() < deadline) {
       for (const [remId, task] of pending) {
-        const receipt = await dispatcher.receipt(task.sourceDeliveryId);
+        let receipt = await dispatcher.receipt(task.sourceDeliveryId);
+        if (dispatcher.advance && receipt?.id.startsWith("desktop-command:")) {
+          try {
+            if (!receipt.dispatchStarted && receipt.status === "queued")
+              await verifyFrozenCommand(remnote, task);
+            await dispatcher.advance(task.sourceDeliveryId);
+            receipt = await dispatcher.receipt(task.sourceDeliveryId);
+          } catch (error) {
+            report.errors.push({
+              remId,
+              message: error instanceof Error ? error.message : "桌面命令核验未完成",
+            });
+            pending.delete(remId);
+            continue;
+          }
+        }
         if (receipt?.threadId && receipt.turnId) {
           try {
             if (task.commandBatch) {
               await acknowledgeBatch(remnote, task.commandBatch, receipt);
-              await api(`/api/deliveries/${receipt.id}/command-batch/acknowledge`, {});
+              if (receipt.id.startsWith("desktop-command:"))
+                await dispatcher.acknowledge?.(receipt.id);
+              else await api(`/api/deliveries/${receipt.id}/command-batch/acknowledge`, {});
               for (const member of task.commandBatch.members)
                 report.acknowledged.push({
                   remId: member.taskRemId,
@@ -578,6 +672,8 @@ async function runUnlocked(
               const status = await acknowledgeStarted(remnote, task, receipt);
               if (status === "changed")
                 throw new Error("source title changed after scan; left unchanged");
+              if (receipt.id.startsWith("desktop-command:"))
+                await dispatcher.acknowledge?.(receipt.id);
               report.acknowledged.push({
                 remId,
                 threadId: receipt.threadId,
@@ -594,12 +690,12 @@ async function runUnlocked(
         } else if (receipt?.status === "failed" || receipt?.status === "coalesced") {
           report.errors.push({
             remId,
-            message: `dispatch ${receipt.status}; inspect WakeWire receipt ${receipt.id}; no replay`,
+            message: receipt.detail ?? `投递状态 ${receipt.status}，请核对原回执 ${receipt.id}`,
           });
           pending.delete(remId);
         } else {
           // File in source order, waiting only for acceptance, never turn completion.
-          break;
+          if (!config.desktopDispatch) break;
         }
       }
       report.pending = [...awaitingRepair, ...pending.keys()];
@@ -621,6 +717,7 @@ async function runUnlocked(
   } catch (error) {
     report.errors.push({ message: error instanceof Error ? error.message : "workflow failed" });
   } finally {
+    await openedDispatcher?.close?.().catch(() => {});
     await remnote.close().catch(() => {});
     report.finishedAt = new Date().toISOString();
     report.status = report.errors.length || report.pending.length ? "partial" : "completed";
@@ -727,7 +824,7 @@ async function main(): Promise<void> {
     if (report.errors.length) process.exitCode = 1;
     return;
   }
-  await verifyDaemon();
+  await verifyDaemon(!config.desktopDispatch);
   if (config.appProjectId) {
     const registry = new NativeProjectRegistry(undefined, config.appOwnerThreadId);
     try {
@@ -739,7 +836,8 @@ async function main(): Promise<void> {
   const remnote = new RemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);
-    await createDispatcher(config);
+    const dispatcher = await createDispatcher(config);
+    await dispatcher.close?.();
     const { sources, maintenance } = await commandSources(config, remnote);
     for (const source of sources)
       await verifyCommandSource(
