@@ -46,6 +46,42 @@ class AdapterTests(unittest.TestCase):
         with patch.object(adapter,'publish_article_content') as publish:
             with self.assertRaisesRegex(ValueError,'settings_require_review'):adapter.update_published(client,request,'owner')
             publish.assert_not_called()
+    def test_revision_requests_both_preexisting_columns_on_the_original_article(self):
+        client,request,preview=self.revision_fixture()
+        article=request['expectedPublic']
+        article['contributions'].append({'state':'accepted','column':{'id':'secondary'}})
+        editor={**article,'column':[{'id':'col'}, {'id':'secondary'}]}
+        client._get.side_effect=[article,editor]
+        client._content_publish.return_value={'publish':{'id':'123'}}
+        with patch.object(adapter,'read_draft',return_value=preview),patch.object(adapter,'check_column') as check:
+            self.assertEqual(adapter.update_published(client,request,'owner'),{'id':'123'})
+            data=client._content_publish.call_args.args[0]['data']
+            self.assertEqual(data['column'],{'column':['col','secondary']})
+            self.assertEqual(data['draft'],{'disabled':1,'id':'123','isPublished':True})
+            self.assertEqual([call.args[1] for call in check.call_args_list],['col','secondary'])
+    def test_restore_rechecks_revision_and_adds_only_missing_original_membership(self):
+        client,request,preview=self.revision_fixture()
+        request['expectedPublic']['contributions'].append({'state':'accepted','column':{'id':'secondary'}})
+        request.update(targetColumn='secondary',prepared=preview)
+        current={**preview,'id':'123','columnIds':['col']}
+        client._session.post.return_value.status_code=201
+        with patch.object(adapter,'read_article',return_value=current),patch.object(adapter,'check_column'):
+            self.assertEqual(adapter.restore_revision_column(client,request,'owner'),{'id':'123'})
+            client._session.post.assert_called_once_with('https://www.zhihu.com/api/v4/columns/secondary/items',json={'type':'article','id':'123'},timeout=15)
+            current['columnIds'].append('secondary')
+            adapter.restore_revision_column(client,request,'owner')
+            self.assertEqual(client._session.post.call_count,1)
+            with self.assertRaisesRegex(ValueError,'outside_original_set'):
+                adapter.restore_revision_column(client,{**request,'targetColumn':'other'},'owner')
+    def test_primary_only_editor_selection_updates_primary_and_defers_secondary_to_readback(self):
+        client,request,preview=self.revision_fixture()
+        article=request['expectedPublic']
+        article['contributions'].append({'state':'accepted','column':{'id':'secondary'}})
+        client._get.side_effect=[article,{**article,'column':{'id':'col'}}]
+        with patch.object(adapter,'read_draft',return_value=preview),patch.object(adapter,'publish_article_content') as publish:
+            adapter.update_published(client,request,'owner')
+            self.assertEqual(publish.call_args.kwargs['revision_columns'],['col'])
+            self.assertEqual(adapter.accepted_column_ids(request['expectedPublic']),['col','secondary'])
     def test_series_metadata_stays_in_footer_with_plain_title_and_original_body(self):
         nodes=[{'text':'A plain title','depth':0},{'text':'Original body','depth':1}]
         prepared=adapter.prepare(nodes,'待发布',series_label='第12 篇 | day 5')
