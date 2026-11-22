@@ -395,14 +395,14 @@ export function pendingRepairDisposition(
   },
 ): { waiting: string[]; errors: Array<{ remId: string; message: string }> } {
   const ready = new Set(readiness.readyIds ?? (readiness.ready ? ids : []));
-  const waiting = ids.filter((id) => !ready.has(id));
-  const waitingIds = new Set(waiting);
+  const waitingIds = new Set(ids.filter((id) => !ready.has(id)));
+  // Readiness is reported for individual members, but the command is sent as a batch.
   const message = readiness.error;
   return {
-    waiting,
+    waiting: waitingIds.size ? ids : [],
     errors:
       readiness.blocked?.filter(({ remId }) => waitingIds.has(remId)) ??
-      (message ? waiting.map((remId) => ({ remId, message })) : []),
+      (message ? [...waitingIds].map((remId) => ({ remId, message })) : []),
   };
 }
 
@@ -561,7 +561,7 @@ async function runUnlocked(
             remIds: pendingItems.map((t) => t.taskRemId),
           });
         }
-        const unready = new Set<string>();
+        let waitingForRepair = false;
         const repairIds = pendingItems
           .map((t) => t.taskRemId)
           .filter((id) => !reservedIds.includes(id));
@@ -574,7 +574,7 @@ async function runUnlocked(
             remIds: repairIds,
           });
           const { waiting, errors } = pendingRepairDisposition(repairIds, readiness);
-          for (const id of waiting) unready.add(id);
+          waitingForRepair = waiting.length > 0;
           report.pending.push(...waiting);
           report.errors.push(...errors);
         }
@@ -591,11 +591,11 @@ async function runUnlocked(
             message: "overlapping parent/child % markers; left unchanged",
           })),
         );
+        if (waitingForRepair) continue;
         const eligible: TodoTask[] = [];
         for (const task of candidates) {
           if (pendingOnly && task.trigger !== "pending") continue;
           if (reservedIds.includes(task.taskRemId)) continue;
-          if (unready.has(task.taskRemId)) continue;
           const legacy = await findLegacyReceipt(
             source,
             task.taskRemId,

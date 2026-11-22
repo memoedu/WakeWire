@@ -9,6 +9,8 @@ import {
 } from "./remnote-todo.js";
 
 const RemId = z.string().regex(/^[A-Za-z0-9_-]+$/);
+const deferredBucket = "暂不处理";
+const deferredAliases = [deferredBucket, "暂时不", "暂时不做"];
 export const CommandSourceSchema = z.object({
   documentRemId: RemId,
   title: z.string().min(1),
@@ -85,7 +87,7 @@ export async function scanCommandSource(
   excludedIds.delete(source.documentRemId);
   const children = await allChildren(remnote, source.documentRemId);
   for (const node of children)
-    if (["已完成", "暂时不", "暂时不做", "凌晨处理"].includes(node.title.trim()))
+    if (["已完成", ...deferredAliases, "凌晨处理"].includes(node.title.trim()))
       excludedIds.add(node.remId);
   const pending = children.filter((n) => n.title.trim() === "待发送");
   if (pending.length > 1) throw new Error("document has multiple 待发送 buckets");
@@ -143,12 +145,20 @@ export async function ensureCommandBuckets(
 ): Promise<Record<string, string>> {
   const children = await allChildren(remnote, documentRemId),
     result: Record<string, string> = {};
-  for (const title of ["暂时不", "凌晨处理", "待发送"]) {
+  for (const title of [deferredBucket, "凌晨处理", "待发送"]) {
     const matches = children.filter((n) => n.title.trim() === title);
     if (matches.length > 1) throw new Error(`multiple ${title} buckets`);
-    const id = matches[0]?.remId ?? (await remnote.create(documentRemId, title));
+    const existing =
+      matches[0] ??
+      (title === deferredBucket
+        ? children.find((n) => deferredAliases.includes(n.title.trim()))
+        : undefined);
+    const id = existing?.remId ?? (await remnote.create(documentRemId, title));
     const node = await remnote.read(id);
-    if (node.parentRemId !== documentRemId || node.title.trim() !== title)
+    if (
+      node.parentRemId !== documentRemId ||
+      node.title.trim() !== (existing?.title.trim() ?? title)
+    )
       throw new Error("bucket readback mismatch");
     result[title] = id;
   }

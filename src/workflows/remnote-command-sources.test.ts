@@ -10,7 +10,7 @@ import {
 import { eventIdFor, type RemNode, type RemNoteReader, scanTodo } from "./remnote-todo.js";
 import { pendingRepairDisposition } from "./remnote-todo-cli.js";
 
-it("isolates unreviewed commands and maps repair failures only to the affected items", () => {
+it("holds every batch member while mapping repair failures only to the affected items", () => {
   const ids = ["ready", "blocked", "waiting"];
   expect(
     pendingRepairDisposition(ids, {
@@ -22,9 +22,10 @@ it("isolates unreviewed commands and maps repair failures only to the affected i
       ],
     }),
   ).toEqual({
-    waiting: ["blocked", "waiting"],
+    waiting: ids,
     errors: [{ remId: "blocked", message: "independent review failed" }],
   });
+  expect(pendingRepairDisposition(ids, { ready: true })).toEqual({ waiting: [], errors: [] });
 });
 
 function fixture(): RemNoteReader {
@@ -35,6 +36,10 @@ function fixture(): RemNoteReader {
     { remId: "detail", title: "$x^2$\n另一行", parentRemId: "task" },
     { remId: "done", title: "已完成 ", parentRemId: "doc" },
     { remId: "archived", title: "%旧事项", parentRemId: "done" },
+    { remId: "deferred", title: "暂不处理", parentRemId: "doc" },
+    { remId: "deferred-task", title: "%暂不执行", parentRemId: "deferred" },
+    { remId: "legacy-deferred", title: "暂时不做", parentRemId: "doc" },
+    { remId: "legacy-deferred-task", title: "%旧暂存", parentRemId: "legacy-deferred" },
     { remId: "routine", title: "%%暂不投递", parentRemId: "doc" },
     { remId: "other", title: "其他 Document", remType: "document", parentRemId: "doc" },
     { remId: "other-task", title: "%独立范围", parentRemId: "other" },
@@ -90,7 +95,12 @@ describe("shared RemNote command sources", () => {
     };
     const a = await scanCommandSource(remnote, ordinary, new Set(["other"]));
     const b = await scanCommandSource(remnote, maintenance, new Set(["other"]));
-    const raw = await scanTodo(remnote, "doc", undefined, new Set(["other", "done"]));
+    const raw = await scanTodo(
+      remnote,
+      "doc",
+      undefined,
+      new Set(["other", "done", "deferred", "legacy-deferred"]),
+    );
     expect(a.tasks).toEqual(raw.tasks);
     expect(a.tasks.map((t) => t.taskRemId)).toEqual(["task"]);
     expect(b.tasks.map(({ developerInstructions: _, ...task }) => task)).toEqual(a.tasks);
