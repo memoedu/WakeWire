@@ -343,12 +343,20 @@ def update_published(client, request, account_id):
     if len(columns) > 1:
         editor = client._get(f'https://zhuanlan.zhihu.com/api/articles/{article_id}/draft')
         selected = editor.get('column')
-        editor_columns = sorted(str(col.get('url_token') or col.get('id')) if isinstance(col, dict) else str(col) for col in selected) if isinstance(selected, list) else []
+        if isinstance(selected, dict):
+            selected = [selected]
+        editor_columns = sorted(str(col.get('url_token') or col.get('id')) if isinstance(col, dict) else str(col)
+                                for col in selected) if isinstance(selected, list) else []
         if (str(editor.get('id')) != article_id or editor.get('author', {}).get('id') != account_id
-                or editor.get('state') != 'published' or editor_columns != sorted(columns)
+                or editor.get('state') != 'published' or editor_columns not in (sorted(columns), columns[:1])
                 or editor.get('title') != actual['title'] or normalize(editor.get('content', '')) != normalize(actual['content'])
-                or format_structure(editor.get('content', '')) != format_structure(actual['content'])):
+                or format_structure(editor.get('content', '')) != format_structure(actual['content'])
+                or catalog_setting(editor) != catalog_setting(actual)):
             raise ValueError('revision_editor_changed')
+        # Some editor responses expose only the primary selection. Keep the full
+        # public set in the durable revision; readback will restore any missing items.
+        if editor_columns == columns[:1]:
+            columns = columns[:1]
     preview=read_draft(client,request['previewId'])
     if preview['authorId']!=account_id or preview['state']!='draft' or any(preview[k]!=request['expectedPreview'][k] for k in ('title','text','format','tableOfContents')):
         raise ValueError('revision_preview_changed')

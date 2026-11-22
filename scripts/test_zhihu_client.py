@@ -73,6 +73,15 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(client._session.post.call_count,1)
             with self.assertRaisesRegex(ValueError,'outside_original_set'):
                 adapter.restore_revision_column(client,{**request,'targetColumn':'other'},'owner')
+    def test_primary_only_editor_selection_updates_primary_and_defers_secondary_to_readback(self):
+        client,request,preview=self.revision_fixture()
+        article=request['expectedPublic']
+        article['contributions'].append({'state':'accepted','column':{'id':'secondary'}})
+        client._get.side_effect=[article,{**article,'column':{'id':'col'}}]
+        with patch.object(adapter,'read_draft',return_value=preview),patch.object(adapter,'publish_article_content') as publish:
+            adapter.update_published(client,request,'owner')
+            self.assertEqual(publish.call_args.kwargs['revision_columns'],['col'])
+            self.assertEqual(adapter.accepted_column_ids(request['expectedPublic']),['col','secondary'])
     def test_series_metadata_stays_in_footer_with_plain_title_and_original_body(self):
         nodes=[{'text':'A plain title','depth':0},{'text':'Original body','depth':1}]
         prepared=adapter.prepare(nodes,'待发布',series_label='第12 篇 | day 5')
