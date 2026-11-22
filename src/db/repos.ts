@@ -353,6 +353,26 @@ export class DeliveryStore {
     return rows.map(toDelivery);
   }
 
+  acceptedCommandThreads(routeId: string, documentRemId: string) {
+    const rows = this.db
+      .prepare(`SELECT deliveries.thread_id AS threadId, deliveries.received_at AS receivedAt,
+        json_group_array(json_extract(member.value, '$.taskRemId')) AS taskRemIds
+      FROM deliveries, json_each(deliveries.event_json, '$.payload.commandBatch.members') AS member
+      WHERE route_id = ? AND is_replay = 0 AND status <> 'skipped-duplicate'
+      AND thread_id IS NOT NULL AND turn_id IS NOT NULL
+      AND json_extract(event_json, '$.payload.commandBatch.documentRemId') = ?
+      GROUP BY deliveries.id`)
+      .all(routeId, documentRemId) as Array<{
+      threadId: string;
+      receivedAt: string;
+      taskRemIds: string;
+    }>;
+    return rows.map(({ taskRemIds, ...row }) => ({
+      ...row,
+      taskRemIds: JSON.parse(taskRemIds) as string[],
+    }));
+  }
+
   acknowledgeCommandBatch(id: string): void {
     const delivery = this.get(id);
     if (!delivery?.threadId || !delivery.turnId || !delivery.event.payload.commandBatch)

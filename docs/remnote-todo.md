@@ -43,6 +43,8 @@ Windows 用户须登录，WakeWire 和本地 RemNote 桥接须可用。Project �
 
 维护入口按 Document 成批，序号及混合标记规则见 [项目维护](remnote-maintenance.md)。`remnote-command-batch.ts` 只组织批次与受理后的编号前移，原文导出和原节点归位继续共用本实现。待恢复批次保存在原 deliveries 记录的本机元数据中；普通命令不携带批次计划。
 
+决策工作台通过管理接口 `GET /api/routes/:id/command-threads?documentRemId=...` 读取指定 Document 已获首轮回执的批次。接口返回 Thread 身份、受理批次的投放时间和原事项身份，供工作台核对「工作中」状态，正文仍留在原回执。
+
 本地路由使用 `promptMode: verbatim`、`sandbox: user-config` 和 `projectPlacement: after-turn`。私有 App Server 采用本机的权限配置。保存的 `appOwnerThreadId` 供桌面工具在首轮结束后办理归属，投放可由独立进程发起。
 
 需要暂停时停用 Windows 计划和对应路由。保留投递记录用于去重与恢复。
