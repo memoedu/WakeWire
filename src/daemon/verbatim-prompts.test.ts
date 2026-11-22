@@ -103,7 +103,17 @@ describe("verbatim local prompt delivery", () => {
       expect(result.status).toBe(202);
       const { delivery } = (await result.json()) as { delivery: { id: string } };
       const pending = () => f.stores.deliveries.pendingCommandBatches(route.id, "doc");
+      const commandThreads = async (documentRemId: string) =>
+        (
+          await f.app.request(
+            `/api/routes/${route.id}/command-threads?documentRemId=${documentRemId}`,
+            {
+              headers: f.headers,
+            },
+          )
+        ).json();
       expect(pending()).toHaveLength(1);
+      expect(await commandThreads("doc")).toEqual({ threads: [] });
       const ack = () =>
         f.app.request(`/api/deliveries/${delivery.id}/command-batch/acknowledge`, {
           method: "POST",
@@ -128,9 +138,18 @@ describe("verbatim local prompt delivery", () => {
         ).status,
       ).toBe(200);
       expect(pending()[0]?.event.payload.commandBatch).toEqual(task.commandBatch);
+      const accepted = {
+        threadId: pending()[0]?.threadId,
+        receivedAt: pending()[0]?.receivedAt,
+        taskRemIds: ["task"],
+      };
+      expect(accepted.threadId).toBeTruthy();
+      expect(await commandThreads("doc")).toEqual({ threads: [accepted] });
+      expect(await commandThreads("another-doc")).toEqual({ threads: [] });
       expect((await ack()).status).toBe(200);
       expect((await ack()).status).toBe(200);
       expect(pending()).toHaveLength(0);
+      expect(await commandThreads("doc")).toEqual({ threads: [accepted] });
       expect(f.calls).toEqual([task.prompt]);
     } finally {
       f.db.close();

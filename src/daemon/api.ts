@@ -156,6 +156,14 @@ export function createApi(ctx: ApiContext): Hono {
     }
   });
 
+  app.get("/api/routes/:id/command-threads", (c) => {
+    const documentRemId = c.req.query("documentRemId");
+    if (!documentRemId) return c.json({ error: "documentRemId required" }, 400);
+    return c.json({
+      threads: ctx.stores.deliveries.acceptedCommandThreads(c.req.param("id"), documentRemId),
+    });
+  });
+
   app.post("/api/routes/:id/toggle", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const enabled = z.object({ enabled: z.boolean() }).safeParse(body);
