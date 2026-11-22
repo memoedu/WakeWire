@@ -17,7 +17,7 @@ async function fixture(){
  const preparedByHtml=new Map(),drafts=new Map(),calls={create:0,write:0,update:0,apply:0,savedSync:[]};
  const prepare=async(ns,stamp,series)=>{const text=ns.slice(1).map(n=>n.text).join('|')+(stamp?`|${series}|${stamp}`:'');const result={title:ns[0].text,text,html:`<p>${text}</p>`,format:JSON.stringify({text}),tableOfContents:false};preparedByHtml.set(result.html,result);return clone(result);};
  let publicCloud=await prepare(baseline.nodes,'2026.01.02 12:00','第3 篇 | day 2');
- const remote={id:'123',title:publicCloud.title,content:publicCloud.html,state:'published',author:{id:'owner'}};
+ const remote={id:'123',title:publicCloud.title,content:publicCloud.html,state:'published',author:{id:'owner'},contributions:[{state:'accepted',column:{id:'col'}}]};
  const state={receipts:[{source:baseline,articleId:'123',title:publicCloud.title,text:publicCloud.text,format:publicCloud.format,tableOfContents:false,stage:'archived',slot:'initial',columnId:'col'}]};
  const sync={articles:{'123':{sourceBaseline:clone(baseline),publishedSnapshot:clone(remote)}},drafts:{}};
  const publisher={prepare,
@@ -34,7 +34,7 @@ async function fixture(){
   readDraft:async id=>clone(drafts.get(id)),
   writeDraft:async(id,title,html,expected)=>{calls.write++;expect(drafts.get(id)).toEqual(expected);const p=preparedByHtml.get(html);const saved={...p,id,authorId:'owner',state:'draft',editorUrl:`https://example.org/${id}`};drafts.set(id,saved);return clone(saved);},
   updatePublished:async args=>{expect(sync.revisions['123'].stage).toBe('submitting');expect(args.articleId).toBe('123');calls.update++;publicCloud=clone(preparedByHtml.get(args.html));remote.title=args.title;remote.content=args.html;return {id:'123'};},
-  verify:async id=>({...clone(publicCloud),id,authorId:'owner',columnIds:['col'],url:`https://zhuanlan.zhihu.com/p/${id}`})
+  verify:async id=>({...clone(publicCloud),id,authorId:'owner',columnIds:remote.contributions.map(c=>c.column.id),url:`https://zhuanlan.zhihu.com/p/${id}`})
  };
  const o={runtime,state,sync,reader,publisher,slot,cfg:{documentRemId:'doc',accountId:'owner',columnId:'col'},decision:{direction:'local'},
   saveSync:()=>calls.savedSync.push(clone(sync)),saveState:()=>{},currentSlot:()=>slot,bundle:id=>`isolated-${id}`,apply:async()=>{calls.apply++;throw Error('sync_native_write_requires_review');},nodes,calls,drafts,remote};
@@ -97,6 +97,38 @@ describe('controlled article sync ownership and recovery',()=>{
   const o=await fixture();await auditControlled(o);o.publisher.updatePublished=async()=>{o.calls.update++;throw Error('timeout');};
   await publishControlled(o);expect(o.sync.revisions['123'].stage).toBe('submitting');expect(o.state.syncFeedback.issues).toBe(1);
   await publishControlled(o);o.slot='2026-01-03T22:30+08:00';await publishControlled(o);expect(o.calls.update).toBe(1);
+ });
+ it('restores only an original column missing after a verified revision',async()=>{
+  const o=await fixture();const secondary={state:'accepted',column:{id:'secondary'}};
+  o.remote.contributions.push(secondary);
+  const update=o.publisher.updatePublished;let restores=0;
+  o.publisher.updatePublished=async args=>{const result=await update(args);o.remote.contributions.pop();return result;};
+  o.publisher.restoreRevisionColumn=async ({articleId,targetColumn})=>{
+   expect(articleId).toBe('123');expect(targetColumn).toBe('secondary');
+   expect(o.sync.revisions['123'].columnAttempts.secondary).toBeTruthy();
+   restores++;o.remote.contributions.push(secondary);return {id:articleId};
+  };
+  await auditControlled(o);expect((await publishControlled(o)).updated).toBe(1);
+  expect(restores).toBe(1);expect(o.calls.update).toBe(1);expect(o.sync.revisions['123'].stage).toBe('completed');
+ });
+ it('recovers a delayed column result by readback without repeating either mutation',async()=>{
+  const o=await fixture();const secondary={state:'accepted',column:{id:'secondary'}};
+  o.remote.contributions.push(secondary);
+  const update=o.publisher.updatePublished;let restores=0;
+  o.publisher.updatePublished=async args=>{const result=await update(args);o.remote.contributions.pop();return result;};
+  o.publisher.restoreRevisionColumn=async ()=>{restores++;throw Error('timeout');};
+  await auditControlled(o);expect((await publishControlled(o)).updated).toBe(0);
+  await publishControlled(o);expect(restores).toBe(1);
+  expect(o.sync.revisions['123'].issue).toBe('sync_revision_column_restore_pending');
+  o.remote.contributions.push(secondary);
+  await publishControlled(o);expect(o.sync.revisions['123'].stage).toBe('completed');
+  expect(o.calls.update).toBe(1);expect(restores).toBe(1);
+ });
+ it('blocks an intervening author change to column membership before submitting',async()=>{
+  const o=await fixture();o.remote.contributions.push({state:'accepted',column:{id:'secondary'}});
+  await auditControlled(o);o.remote.contributions.pop();
+  expect((await publishControlled(o)).updated).toBe(0);expect(o.calls.update).toBe(0);
+  expect(o.sync.revisions['123'].issue).toBe('sync_revision_column_membership_changed');
  });
  it('adopts a verified successful timeout result without resubmitting and clears its issue',async()=>{
   const o=await fixture();await auditControlled(o);const real=o.publisher.updatePublished;

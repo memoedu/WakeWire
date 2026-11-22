@@ -268,6 +268,9 @@ export class ZhihuPublisher implements ArticlePublisher {
   updatePublished(args: Record<string, unknown>): Promise<{ id: string }> {
     return this.call("update-published", args);
   }
+  restoreRevisionColumn(args: Record<string, unknown>): Promise<{ id: string }> {
+    return this.call("restore-revision-column", args);
+  }
   readDraft(articleId: string): Promise<CloudDraft> {
     return this.call("read-draft", { articleId });
   }

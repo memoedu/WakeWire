@@ -167,6 +167,12 @@ def article_id_from_result(result):
     raise ValueError("publish_result_id_missing")
 
 
+def accepted_column_ids(article):
+    return sorted({str(column.get('url_token') or column['id'])
+        for item in article.get('contributions', []) if item.get('state') == 'accepted'
+        and (column := item.get('column', {})) and (column.get('url_token') or column.get('id'))})
+
+
 def read_article(client, article_id):
     if not re.fullmatch(r"\d+", article_id):
         raise ValueError("invalid_article_id")
@@ -181,13 +187,9 @@ def read_article(client, article_id):
     html = article.get("content", "")
     if not isinstance(html, str) or not html:
         raise ValueError("article_content_missing")
-    columns = {item.get("column", {}).get("url_token") or item.get("column", {}).get("id")
-               for item in article.get("contributions", []) if item.get("state") == "accepted"}
-    # A primary column is accepted only when the server also exposes that accepted contribution.
-    columns.discard(None)
     return {"id": str(article.get("id", "")), "authorId": article.get("author", {}).get("id", ""),
             "title": article.get("title", "") or "", "text": normalize(html), "format": format_structure(html),
-            "columnIds": sorted(columns), "tableOfContents": catalog_setting(article),
+            "columnIds": accepted_column_ids(article), "tableOfContents": catalog_setting(article),
             "url": f"https://zhuanlan.zhihu.com/p/{article_id}"}
 
 
@@ -279,8 +281,10 @@ def publish_saved_draft(client, article_id, title, html, column_id, account_id, 
     return publish_article_content(client, article_id, title, html, column_id)
 
 
-def publish_article_content(client, article_id, title, html, column_id, is_published=False):
-    check_column(client, column_id)
+def publish_article_content(client, article_id, title, html, column_id, is_published=False, revision_columns=None):
+    columns = revision_columns if revision_columns is not None else [column_id]
+    for token in columns:
+        check_column(client, token)
     # Match the current first-party editor's article payload. The pinned
     # client's text-only create_article branch still uses a retired endpoint.
     visible = VisibleText()
@@ -290,7 +294,7 @@ def publish_article_content(client, article_id, title, html, column_id, is_publi
         "data": {
             "extra_info": {"publisher": "pc"},
             "draft": {"disabled": 1, "id": article_id, "isPublished": is_published},
-            "column": {"column": [column_id]},
+            "column": {"column": columns},
             "commentsPermission": {"comment_permission": "anyone"},
             "creationStatement": {"disclaimer_type": "none", "disclaimer_status": "close"},
             "contentsTables": {"table_of_contents_enabled": has_catalog_headings(html)},
@@ -316,6 +320,13 @@ def publish_in_column(client, title, html, column_id):
         raise ValueError("new_publish_draft_not_empty")
     return publish_saved_draft(client, created["id"], title, html, column_id, before["authorId"], before)
 
+def revision_columns(actual, before, primary):
+    expected = accepted_column_ids(before)
+    if primary not in expected or accepted_column_ids(actual) != expected:
+        raise ValueError('revision_public_columns_changed')
+    return [primary, *(column for column in expected if column != primary)]
+
+
 def update_published(client, request, account_id):
     article_id=request['articleId']
     if not re.fullmatch(r'\d+',article_id):raise ValueError('invalid_article_id')
@@ -328,15 +339,46 @@ def update_published(client, request, account_id):
     # Preserve unsupported public settings by stopping instead of resetting them.
     if actual.get('title_image') or actual.get('comment_permission') not in (None,'all') or actual.get('creation_statement'):
         raise ValueError('revision_public_settings_require_review')
-    accepted={str(c.get('column',{}).get('url_token') or c.get('column',{}).get('id')) for c in actual.get('contributions',[]) if c.get('state')=='accepted'}
-    if accepted!={request['columnId']}:raise ValueError('revision_public_columns_require_review')
+    columns = revision_columns(actual, before, request['columnId'])
+    if len(columns) > 1:
+        editor = client._get(f'https://zhuanlan.zhihu.com/api/articles/{article_id}/draft')
+        selected = editor.get('column')
+        editor_columns = sorted(str(col.get('url_token') or col.get('id')) if isinstance(col, dict) else str(col) for col in selected) if isinstance(selected, list) else []
+        if (str(editor.get('id')) != article_id or editor.get('author', {}).get('id') != account_id
+                or editor.get('state') != 'published' or editor_columns != sorted(columns)
+                or editor.get('title') != actual['title'] or normalize(editor.get('content', '')) != normalize(actual['content'])
+                or format_structure(editor.get('content', '')) != format_structure(actual['content'])):
+            raise ValueError('revision_editor_changed')
     preview=read_draft(client,request['previewId'])
     if preview['authorId']!=account_id or preview['state']!='draft' or any(preview[k]!=request['expectedPreview'][k] for k in ('title','text','format','tableOfContents')):
         raise ValueError('revision_preview_changed')
     if preview['title']!=request['title'] or preview['text']!=normalize(request['html']) or preview['format']!=format_structure(request['html']):
         raise ValueError('revision_approval_changed')
     validate_links(request['html'])
-    return publish_article_content(client,article_id,request['title'],request['html'],request['columnId'],is_published=True)
+    return publish_article_content(client, article_id, request['title'], request['html'], request['columnId'],
+                                   is_published=True, revision_columns=columns)
+
+
+def restore_revision_column(client, request, account_id):
+    article_id, target = request['articleId'], request['targetColumn']
+    before, prepared = request['expectedPublic'], request['prepared']
+    expected = accepted_column_ids(before)
+    if target not in expected or target == request['columnId']:
+        raise ValueError('revision_column_restore_outside_original_set')
+    check_column(client, target)
+    article = read_article(client, article_id)
+    if (article['id'] != article_id or article['authorId'] != account_id
+            or any(article[key] != prepared[key] for key in ('title','text','format','tableOfContents'))):
+        raise ValueError('revision_column_restore_public_changed')
+    current = article['columnIds']
+    if request['columnId'] not in current or not set(current).issubset(expected):
+        raise ValueError('revision_column_restore_membership_changed')
+    if target not in current:
+        response = client._session.post(f'https://www.zhihu.com/api/v4/columns/{target}/items',
+                                       json={'type': 'article', 'id': article_id}, timeout=15)
+        if response.status_code not in (200, 201, 204):
+            raise ValueError('revision_column_restore_unconfirmed')
+    return {'id': article_id}
 
 
 def main(request):
@@ -374,6 +416,8 @@ def main(request):
             return write_draft(client, request["articleId"], request["title"], request["html"], account["id"], request["expected"])
         if action == 'update-published':
             return update_published(client,request,account['id'])
+        if action == 'restore-revision-column':
+            return restore_revision_column(client, request, account['id'])
         if action == "publish":
             if request.get("draftId"):
                 return publish_saved_draft(client, request["draftId"], request["title"], request["html"], request["columnId"], account["id"], request["expected"])

@@ -6,6 +6,10 @@ import assert from 'node:assert/strict';
 
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const atom=(a,b)=>a.title===b.title&&a.text===b.text&&a.format===b.format&&a.tableOfContents===b.tableOfContents;
+function acceptedColumns(article){
+ return [...new Set((article.contributions??[]).filter(item=>item.state==='accepted')
+  .map(item=>item.column?.url_token||item.column?.id).filter(Boolean).map(String))].sort();
+}
 /** Bounded retry is used only for reads, never for a native write or publication. */
 export async function retrySyncRead(read,pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))){
  for(let attempt=0;attempt<2;attempt++){
@@ -33,7 +37,10 @@ export async function auditControlled(o){
   let title=item.source.nodes[0].text;
   try{
    if(sync.operations[item.id])throw Error('sync_pending_operation_requires_review');
-   if(['creating','writing','submitting','published'].includes(sync.revisions[item.id]?.stage))throw Error('sync_unknown_revision_result');
+   const pending=sync.revisions[item.id];
+   if(['creating','writing','submitting','published'].includes(pending?.stage)){
+    throw Error(pending.issue??'sync_unknown_revision_result');
+   }
    let base=item.published?sync.articles[item.id]:sync.drafts[item.source.remId];
    const remote=await readOnly(()=>publisher.syncModel('read-article',{id:item.id,draft:!item.published}));
    assert.equal(remote.state,item.published?'published':'draft');assert.equal(remote.author.id,cfg.accountId);
@@ -149,10 +156,31 @@ export async function publishControlled(o){
  const {state,sync,publisher,cfg,slot}=o;let updated=0;const updates=[];
  sync.revisions??={};sync.updatedSlots??={};
  const finalize=async(revision)=>{
-  const actual=await publisher.verify(revision.articleId);
-  assert.equal(actual.id,revision.articleId);assert.equal(actual.authorId,cfg.accountId);assert(actual.columnIds.includes(cfg.columnId));assert(atom(actual,revision.prepared),'sync_revision_public_readback_mismatch');
+  const expected=acceptedColumns(revision.expectedPublic);
+  const verifyBody=async()=>{
+   const result=await publisher.verify(revision.articleId);
+   assert.equal(result.id,revision.articleId);
+   assert.equal(result.authorId,cfg.accountId);
+   assert(atom(result,revision.prepared),'sync_revision_public_readback_mismatch');
+   assert(expected.includes(cfg.columnId)&&result.columnIds.includes(cfg.columnId)
+    &&result.columnIds.every(id=>expected.includes(id)),'sync_revision_column_membership_changed');
+   return result;
+  };
+  let actual=await verifyBody();
+  for(const targetColumn of expected.filter(id=>!actual.columnIds.includes(id))){
+   revision.columnAttempts??={};
+   assert(!revision.columnAttempts[targetColumn],'sync_revision_column_restore_pending');
+   revision.columnAttempts[targetColumn]=new Date().toISOString();
+   o.saveSync();
+   await publisher.restoreRevisionColumn({articleId:revision.articleId,expectedPublic:revision.expectedPublic,
+    prepared:revision.prepared,columnId:cfg.columnId,targetColumn});
+   actual=await verifyBody();
+   assert(actual.columnIds.includes(targetColumn),'sync_revision_column_restore_pending');
+  }
   const raw=await publisher.syncModel('read-article',{id:revision.articleId});
   assert(atom(await publisher.syncModel('view',{article:raw}),revision.prepared),'sync_revision_changed_before_baseline');
+  assert(same(acceptedColumns(raw),expected),'sync_revision_column_membership_changed');
+  assert.equal(raw.created,revision.expectedPublic.created,'sync_revision_public_timestamp_changed');
   sync.articles[revision.articleId]={sourceBaseline:revision.source,publishedSnapshot:raw,lastSyncAt:new Date().toISOString()};
   const receipt=state.receipts.find(r=>r.articleId===revision.articleId);assert(receipt);
   Object.assign(receipt,revision.prepared,{source:revision.source,bodyText:revision.bodyText,firstPublishedAt:revision.firstPublishedAt,seriesLabel:revision.seriesLabel});
@@ -165,7 +193,9 @@ export async function publishControlled(o){
   const articles=[...unresolved,...active];state.syncFeedback={updatedAt:new Date().toISOString(),phase:'update',articles,issues:articles.filter(r=>r.status==='blocked').length};o.saveState();
  };
  for(const r of Object.values(sync.revisions))if(['submitting','published'].includes(r.stage)){
-  try{await finalize(r);}catch{r.issue='sync_unknown_revision_result';o.saveSync();}
+  try{await finalize(r);}catch(error){
+   r.issue=Object.keys(r.columnAttempts??{}).length?'sync_revision_column_restore_pending':error.message==='sync_revision_column_membership_changed'?'sync_revision_column_membership_changed':'sync_unknown_revision_result';o.saveSync();
+  }
  }
  if(!slot){feedback();return {updated,updates};}
  if(sync.updatedSlots[slot]||Object.values(sync.revisions).some(r=>r.submittedSlot===slot)){feedback();return {updated,updates};}
@@ -179,11 +209,12 @@ export async function publishControlled(o){
    const current=await publisher.syncModel('read-article',{id:revision.articleId});
    if(current.title_image||current.comment_permission&&current.comment_permission!=='all'||current.creation_statement)throw Error('sync_public_settings_require_review');
    await publisher.syncModel('assert-published',{before:revision.expectedPublic,article:current});
+   assert(same(acceptedColumns(current),acceptedColumns(revision.expectedPublic))&&acceptedColumns(current).includes(cfg.columnId),'sync_revision_column_membership_changed');
    assert.equal(o.currentSlot(),slot,'sync_revision_window_ended');
    revision.stage='submitting';revision.submittedSlot=slot;sync.updatedSlots[slot]={articleId:revision.articleId,at:new Date().toISOString()};o.saveSync();
    const result=await publisher.updatePublished({articleId:revision.articleId,previewId:revision.previewId,expectedPublic:revision.expectedPublic,expectedPreview:revision.preview,title:revision.prepared.title,html:revision.prepared.html});
    assert.equal(result.id,revision.articleId);revision.stage='published';o.saveSync();await finalize(revision);updated++;
-  }catch(error){revision.issue=revision.stage==='submitting'?'sync_unknown_revision_result':error instanceof Error&&/^sync_[a-z_]+$/.test(error.message)?error.message:'sync_revision_changed_before_update';if(revision.stage==='approved')revision.stage='blocked';o.saveSync();}
+  }catch(error){revision.issue=Object.keys(revision.columnAttempts??{}).length?'sync_revision_column_restore_pending':revision.stage==='submitting'?'sync_unknown_revision_result':error instanceof Error&&/^sync_[a-z_]+$/.test(error.message)?error.message:'sync_revision_changed_before_update';if(revision.stage==='approved')revision.stage='blocked';o.saveSync();}
   break;
  }
  feedback();return {updated,updates};

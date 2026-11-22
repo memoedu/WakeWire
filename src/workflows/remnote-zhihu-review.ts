@@ -239,6 +239,10 @@ export function articleFeedback(state: ArticleState, now: Date, phase: string, s
 }
 
 function syncIssue(code: string): string {
+  if (code === "sync_revision_column_restore_pending")
+    return "正文已更新，原专栏的补收录尚未确认。请核对专栏，流程会继续读取结果。";
+  if (code === "sync_revision_column_membership_changed")
+    return "知乎专栏归属与审核时不同，请核对原文章的收录状态。";
   if (/remnote_(?:timeout|unavailable)/u.test(code))
     return "RemNote 读取在有限重试后仍失败，原稿未改动，等待连接恢复后重新检查。";
   if (/zhihu_read_failed/u.test(code))
