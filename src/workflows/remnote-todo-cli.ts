@@ -486,6 +486,7 @@ async function runUnlocked(
     for (const source of sources) {
       if (documentRemId && source.documentRemId !== documentRemId) continue;
       try {
+        const frozen = new Set<string>();
         await verifyCommandSource(
           remnote,
           source,
@@ -509,8 +510,6 @@ async function runUnlocked(
               >;
             }>(`/api/routes/${config.routeId}/command-batches?${query}`)
           ).deliveries;
-          if (prior.length > 1)
-            throw new Error("multiple pending batches in one Document; review original receipts");
           const desktop = (await dispatcher.pending?.(source.documentRemId)) ?? [];
           const resumed = prior
             .map<TodoTask>((delivery) => {
@@ -524,6 +523,13 @@ async function runUnlocked(
             })
             .concat(desktop.map(({ task }) => task));
           if (resumed.length) {
+            for (const task of resumed) {
+              for (const member of task.commandBatch?.members ?? [task]) {
+                if (frozen.has(member.taskRemId))
+                  throw new Error("overlapping pending receipts; review original batches");
+                frozen.add(member.taskRemId);
+              }
+            }
             const matching = resumed.filter(
               (task) =>
                 !selected ||
@@ -531,17 +537,7 @@ async function runUnlocked(
                   selected.has(member.taskRemId),
                 ),
             );
-            if (selected && !matching.length) report.pending.push(...selected);
             tasks.push(...matching);
-            report.documents.push({
-              documentRemId: source.documentRemId,
-              title: source.title,
-              markedTasks: matching.reduce(
-                (count, task) => count + (task.commandBatch?.members.length ?? 1),
-                0,
-              ),
-            });
-            continue;
           }
         }
         if (options.resumeOnly) continue;
@@ -549,10 +545,16 @@ async function runUnlocked(
         const scan = await scanCommandSource(remnote, source, excluded, (scanned) =>
           console.log(JSON.stringify({ documentRemId: source.documentRemId, scanned })),
         );
-        const candidates = selected
-          ? scan.tasks.filter((task) => selected.has(task.taskRemId))
-          : scan.tasks;
-        const pendingItems = candidates.filter((t) => t.trigger === "pending");
+        const pendingGroups = scan.pendingGroups.filter(
+          (group) => !selected || group.some((task) => selected.has(task.taskRemId)),
+        );
+        const pendingItems = pendingGroups.flat();
+        const candidates = [
+          ...pendingItems,
+          ...scan.tasks.filter(
+            (task) => task.trigger !== "pending" && (!selected || selected.has(task.taskRemId)),
+          ),
+        ];
         let reservedIds: string[] = [];
         if (config.pendingRepairModule && config.pendingRepairConfig) {
           const { reserved } = await import(pathToFileURL(config.pendingRepairModule).href);
@@ -560,23 +562,6 @@ async function runUnlocked(
             configFile: config.pendingRepairConfig,
             remIds: pendingItems.map((t) => t.taskRemId),
           });
-        }
-        let waitingForRepair = false;
-        const repairIds = pendingItems
-          .map((t) => t.taskRemId)
-          .filter((id) => !reservedIds.includes(id));
-        if (!dryRun && repairIds.length) {
-          if (!config.pendingRepairModule || !config.pendingRepairConfig)
-            throw new Error("pending repair adapter is not configured");
-          const { ready } = await import(pathToFileURL(config.pendingRepairModule).href);
-          const readiness = await ready({
-            configFile: config.pendingRepairConfig,
-            remIds: repairIds,
-          });
-          const { waiting, errors } = pendingRepairDisposition(repairIds, readiness);
-          waitingForRepair = waiting.length > 0;
-          report.pending.push(...waiting);
-          report.errors.push(...errors);
         }
         report.scanned += scan.nodeCount;
         report.markedTasks += scan.tasks.length;
@@ -591,11 +576,10 @@ async function runUnlocked(
             message: "overlapping parent/child % markers; left unchanged",
           })),
         );
-        if (waitingForRepair) continue;
         const eligible: TodoTask[] = [];
         for (const task of candidates) {
           if (pendingOnly && task.trigger !== "pending") continue;
-          if (reservedIds.includes(task.taskRemId)) continue;
+          if (frozen.has(task.taskRemId) || reservedIds.includes(task.taskRemId)) continue;
           const legacy = await findLegacyReceipt(
             source,
             task.taskRemId,
@@ -613,7 +597,37 @@ async function runUnlocked(
             report.suppressedLegacy.push({ remId: task.taskRemId, deliveryId: legacy.id });
           else eligible.push(task);
         }
-        if (source.context || source.scope || pendingItems.length) {
+        if (pendingItems.length) {
+          const ids = new Set(eligible.map((task) => task.taskRemId));
+          const groups = pendingGroups.filter((group) => {
+            if (group.every((task) => ids.has(task.taskRemId))) return true;
+            for (const task of group)
+              if (ids.has(task.taskRemId)) report.pending.push(task.taskRemId);
+            return false;
+          });
+          const repairIds = groups.flat().map((task) => task.taskRemId);
+          let readiness: Parameters<typeof pendingRepairDisposition>[1] | undefined;
+          if (!dryRun && repairIds.length) {
+            if (!config.pendingRepairModule || !config.pendingRepairConfig)
+              throw new Error("pending repair adapter is not configured");
+            const { ready } = await import(pathToFileURL(config.pendingRepairModule).href);
+            readiness = await ready({ configFile: config.pendingRepairConfig, remIds: repairIds });
+          }
+          for (const group of groups) {
+            if (readiness) {
+              const { waiting, errors } = pendingRepairDisposition(
+                group.map((task) => task.taskRemId),
+                readiness,
+              );
+              report.pending.push(...waiting);
+              report.errors.push(...errors);
+              if (waiting.length) continue;
+            }
+            const batch = maintenanceBatch(group, true);
+            if (batch) tasks.push(batch);
+          }
+        } else if (frozen.size) {
+        } else if (source.context || source.scope) {
           const batch = maintenanceBatch(eligible);
           if (batch) tasks.push(batch);
         } else tasks.push(...eligible);
@@ -632,7 +646,17 @@ async function runUnlocked(
     const awaitingRepair = [...report.pending];
     const pending = new Map((dryRun ? [] : tasks).map((task) => [task.taskRemId, task]));
     for (const task of dryRun ? [] : tasks) {
-      await ensureQueued(dispatcher, task);
+      try {
+        if (task.commandBatch?.contiguous && !(await dispatcher.receipt(task.sourceDeliveryId)))
+          await verifyFrozenCommand(remnote, task);
+        await ensureQueued(dispatcher, task);
+      } catch (error) {
+        report.errors.push({
+          remId: task.taskRemId,
+          message: error instanceof Error ? error.message : "命令排队失败",
+        });
+        pending.delete(task.taskRemId);
+      }
     }
     const deadline = Date.now() + (config.desktopDispatch ? 1 : config.waitMinutes) * 60_000;
     let lastProgress = 0;

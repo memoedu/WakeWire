@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { maintenanceBatch, verifyFrozenCommand } from "./remnote-command-batch.js";
 import {
   CommandSourceSchema,
   findLegacyReceipt,
@@ -28,7 +29,7 @@ it("holds every batch member while mapping repair failures only to the affected 
   expect(pendingRepairDisposition(ids, { ready: true })).toEqual({ waiting: [], errors: [] });
 });
 
-function fixture(): RemNoteReader {
+function fixture(extra: RemNode[] = []): RemNoteReader {
   const nodes: RemNode[] = [
     { remId: "root", title: "维护根", remType: "document" },
     { remId: "doc", title: "某工作流", remType: "document", parentRemId: "root" },
@@ -43,6 +44,7 @@ function fixture(): RemNoteReader {
     { remId: "routine", title: "%%暂不投递", parentRemId: "doc" },
     { remId: "other", title: "其他 Document", remType: "document", parentRemId: "doc" },
     { remId: "other-task", title: "%独立范围", parentRemId: "other" },
+    ...extra,
   ];
   return {
     children: async (parent) => ({ children: nodes.filter((n) => n.parentRemId === parent) }),
@@ -58,6 +60,32 @@ function fixture(): RemNoteReader {
 }
 
 describe("shared RemNote command sources", () => {
+  it("sends ordered neighboring roots together and splits only at empty leaf siblings", async () => {
+    const separator = { remId: "separator", title: " ", parentRemId: "pending" };
+    const remnote = fixture([
+      { remId: "pending", title: "待发送", parentRemId: "doc" },
+      { remId: "lead", title: "", parentRemId: "pending" },
+      { remId: "a", title: "第一项", parentRemId: "pending" },
+      { remId: "child", title: "细节", parentRemId: "a" },
+      { remId: "empty-parent", title: "", parentRemId: "pending" },
+      { remId: "detail2", title: "有内容", parentRemId: "empty-parent" },
+      separator,
+      { remId: "separator2", title: "", parentRemId: "pending" },
+      { remId: "b", title: "另一条命令", parentRemId: "pending" },
+    ]);
+    const source = CommandSourceSchema.parse({ documentRemId: "doc", title: "一次性命令" });
+    const { pendingGroups } = await scanCommandSource(remnote, source, new Set());
+    expect(pendingGroups.map((group) => group.map((task) => task.taskRemId))).toEqual([
+      ["a", "empty-parent"],
+      ["b"],
+    ]);
+    const batch = maintenanceBatch(pendingGroups[0] ?? [], true);
+    if (!batch) throw Error("missing batch");
+    expect(batch.prompt).toBe("- 第一项\n  - 细节\n\n- \n  - 有内容");
+    await expect(verifyFrozenCommand(remnote, batch)).resolves.toBeUndefined();
+    separator.title = "新内容";
+    await expect(verifyFrozenCommand(remnote, batch)).rejects.toThrow("分组已变化");
+  });
   it.each(["failed", "held", "delivered"])(
     "preserves old %s receipts across root and route migration",
     async (status) => {

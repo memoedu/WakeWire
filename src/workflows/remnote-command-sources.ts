@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   allChildren,
   eventIdFor,
+  isCommandSeparator,
   type RemNoteReader,
   scanTodo,
   type TodoReceipt,
@@ -171,14 +172,27 @@ export async function promoteOvernight(
 ): Promise<string[]> {
   const buckets = await ensureCommandBuckets(remnote, documentRemId),
     moved: string[] = [];
-  for (const node of await allChildren(remnote, buckets.凌晨处理 as string)) {
+  const source = buckets.凌晨处理 as string;
+  const destination = buckets.待发送 as string;
+  const overnight = await allChildren(remnote, source);
+  const first = overnight[0];
+  if (!first) return moved;
+  const previous = (await allChildren(remnote, destination)).at(-1);
+  if (
+    !(await isCommandSeparator(remnote, first)) &&
+    (!previous || !(await isCommandSeparator(remnote, previous)))
+  )
+    await remnote.create(destination, "");
+  for (const node of overnight) {
     if (node.parentRemId !== buckets.凌晨处理) continue;
-    await remnote.move(node.remId, buckets.待发送 as string, buckets.凌晨处理 as string);
+    await remnote.move(node.remId, destination, source);
     const after = await remnote.read(node.remId);
-    if (after.parentRemId !== buckets.待发送 || after.title !== node.title)
+    if (after.parentRemId !== destination || after.title !== node.title)
       throw new Error("overnight move readback mismatch");
     moved.push(node.remId);
   }
+  const last = (await allChildren(remnote, destination)).at(-1);
+  if (last && !(await isCommandSeparator(remnote, last))) await remnote.create(destination, "");
   return moved;
 }
 
