@@ -736,8 +736,9 @@ async function runUnlocked(
       }
       if (pending.size) await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
-    if (pending.size)
-      report.errors.push({ message: "waiting window ended; receipts retained for the next scan" });
+    // A desktop receipt may arrive after this process's wait window. Preserve
+    // those batches for normal receipt recovery without reporting a send failure.
+    report.pending = [...awaitingRepair, ...pending.keys()];
   } catch (error) {
     report.errors.push({ message: error instanceof Error ? error.message : "workflow failed" });
   } finally {
