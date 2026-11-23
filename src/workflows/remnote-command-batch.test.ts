@@ -82,7 +82,7 @@ describe("maintenance batches and sequence advancement", () => {
     f.nodes.set("deferred", {
       remId: "deferred",
       title: "%不要发送",
-      parentRemId: buckets["暂时不"],
+      parentRemId: buckets["暂不处理"],
     });
     f.nodes.set("overnight", {
       remId: "overnight",
@@ -101,7 +101,7 @@ describe("maintenance batches and sequence advancement", () => {
     await acknowledgeBatch(f.reader, batch.commandBatch, accepted);
     expect(f.nodes.get("pending-a")?.parentRemId).toBe("started");
     expect(f.nodes.get("task-1")?.title).toBe("%1编号");
-    expect(f.nodes.get("deferred")?.parentRemId).toBe(buckets["暂时不"]);
+    expect(f.nodes.get("deferred")?.parentRemId).toBe(buckets["暂不处理"]);
     expect(await promoteOvernight(f.reader, "doc")).toEqual(["overnight"]);
     expect(await promoteOvernight(f.reader, "doc")).toEqual([]);
     expect(await ensureCommandBuckets(f.reader, "doc")).toEqual(buckets);

@@ -5,6 +5,7 @@ import {
   acknowledgeStarted,
   allChildren,
   fingerprintTaskNodes,
+  isCommandSeparator,
   losslessTitle,
   NUMBERED_MARKER,
   type RemNode,
@@ -28,6 +29,7 @@ export const CommandBatchSchema = z
   .object({
     documentRemId: z.string().min(1),
     members: z.array(MemberSchema).min(1),
+    contiguous: z.literal(true).optional(),
     renumber: z.array(
       z.object({
         remId: z.string().min(1),
@@ -60,7 +62,7 @@ function sequence(title: string): number | undefined {
 }
 
 /** Unnumbered items win; otherwise only the smallest sequence is eligible this scan. */
-export function maintenanceBatch(tasks: TodoTask[]): TodoTask | undefined {
+export function maintenanceBatch(tasks: TodoTask[], contiguous = false): TodoTask | undefined {
   if (!tasks.length) return undefined;
   const documentRemId = tasks[0]?.documentRemId as string;
   if (tasks.some((t) => t.documentRemId !== documentRemId))
@@ -91,7 +93,12 @@ export function maintenanceBatch(tasks: TodoTask[]): TodoTask | undefined {
             ),
             number: (sequence(t.title) as number) - 1,
           }));
-  const batch = CommandBatchSchema.parse({ documentRemId, members, renumber });
+  const batch = CommandBatchSchema.parse({
+    documentRemId,
+    members,
+    renumber,
+    ...(contiguous ? { contiguous: true } : {}),
+  });
   const digest = crypto
     .createHash("sha256")
     .update(JSON.stringify([documentRemId, members.map((t) => t.taskRemId).sort()]))
@@ -107,7 +114,11 @@ export function maintenanceBatch(tasks: TodoTask[]): TodoTask | undefined {
   };
 }
 
-async function fingerprint(remnote: RemNoteReader, taskRemId: string): Promise<string> {
+async function fingerprint(
+  remnote: RemNoteReader,
+  taskRemId: string,
+  numbered = true,
+): Promise<string> {
   const nodes = new Map<string, RemNode>();
   const visit = async (node: RemNode): Promise<void> => {
     if (nodes.has(node.remId)) throw new Error("cycle in batch member");
@@ -116,7 +127,39 @@ async function fingerprint(remnote: RemNoteReader, taskRemId: string): Promise<s
       if (!child.parentRemId || child.parentRemId === node.remId) await visit(child);
   };
   await visit(await remnote.read(taskRemId));
-  return fingerprintTaskNodes(nodes, taskRemId, undefined, true);
+  return fingerprintTaskNodes(nodes, taskRemId, undefined, numbered);
+}
+
+export async function verifyFrozenCommand(remnote: RemNoteReader, task: TodoTask): Promise<void> {
+  const batch = task.commandBatch;
+  if (batch?.contiguous) {
+    const first = batch.members[0];
+    if (!first) throw new Error("命令批次缺少原节点");
+    const siblings = await allChildren(remnote, first.parentRemId);
+    const start = siblings.findIndex((node) => node.remId === first.taskRemId);
+    const before = siblings[start - 1];
+    const after = siblings[start + batch.members.length];
+    if (
+      start < 0 ||
+      !batch.members.every(
+        (member, offset) => siblings[start + offset]?.remId === member.taskRemId,
+      ) ||
+      (before && !(await isCommandSeparator(remnote, before))) ||
+      (after && !(await isCommandSeparator(remnote, after)))
+    )
+      throw new Error("待发送分组已变化，原回执保留，等待核对");
+  }
+  for (const member of task.commandBatch?.members ?? [task]) {
+    const live = await remnote.read(member.taskRemId);
+    if (
+      live.parentRemId !== member.parentRemId ||
+      live.title !== member.title ||
+      !member.subtreeFingerprint ||
+      (await fingerprint(remnote, member.taskRemId, Boolean(task.commandBatch))) !==
+        member.subtreeFingerprint
+    )
+      throw new Error("命令内容或待发送位置已变化，原回执保留，等待核对");
+  }
 }
 
 /** Idempotent recovery uses the immutable batch in the original delivery receipt. */

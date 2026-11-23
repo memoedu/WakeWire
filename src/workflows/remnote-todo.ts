@@ -47,6 +47,7 @@ export interface TodoTask {
 
 export interface TodoReceipt {
   id: string;
+  detail?: string;
   status: string;
   threadId: string | null;
   turnId: string | null;
@@ -95,6 +96,49 @@ export async function allChildren(remnote: RemNoteReader, parent: string): Promi
     cursors.add(cursor);
   } while (cursor);
   return result;
+}
+
+export function hasBlankTitle(node: RemNode): boolean {
+  return (
+    (!node.remType || node.remType === "text") &&
+    !node.title.trim() &&
+    !node.headline?.trim() &&
+    !node.inlineRefs?.length &&
+    !node.media?.length
+  );
+}
+
+export async function isCommandSeparator(remnote: RemNoteReader, node: RemNode): Promise<boolean> {
+  return hasBlankTitle(node) && (await allChildren(remnote, node.remId)).length === 0;
+}
+
+/** Surround a contiguous group without changing any of its members or a user's existing blanks. */
+export async function surroundCommandGroup(
+  remnote: RemNoteReader,
+  parent: string,
+  ids: readonly string[],
+): Promise<void> {
+  for (const side of ["before", "after"] as const) {
+    const siblings = await allChildren(remnote, parent);
+    const start = siblings.findIndex((n) => n.remId === ids[0]);
+    if (start < 0 || !ids.every((id, offset) => siblings[start + offset]?.remId === id))
+      throw new Error("command group is no longer contiguous in its destination");
+    const end = start + ids.length - 1;
+    const neighbor = siblings[side === "before" ? start - 1 : end + 1];
+    if (neighbor && (await isCommandSeparator(remnote, neighbor))) continue;
+    const id = await remnote.create(parent, "");
+    const anchor = side === "before" ? ids[0] : ids.at(-1);
+    await remnote.move(id, parent, parent, side, anchor);
+    const readback = await allChildren(remnote, parent);
+    const blank = readback.find((node) => node.remId === id);
+    if (
+      !blank ||
+      readback.findIndex((node) => node.remId === id) !==
+        readback.findIndex((node) => node.remId === anchor) + (side === "before" ? -1 : 1) ||
+      !(await isCommandSeparator(remnote, blank))
+    )
+      throw new Error("command separator readback mismatch");
+  }
 }
 
 /** Move the original subtree, then clear its marker only after placement has been verified. */
@@ -166,7 +210,12 @@ export async function scanTodo(
   excludedRemIds: ReadonlySet<string> = new Set(),
   numbered = false,
   pendingBucketId?: string,
-): Promise<{ tasks: TodoTask[]; conflicts: string[]; nodeCount: number }> {
+): Promise<{
+  tasks: TodoTask[];
+  pendingGroups: TodoTask[][];
+  conflicts: string[];
+  nodeCount: number;
+}> {
   const nodes = new Map<string, RemNode>();
   const pending = [documentRemId];
   for (let index = 0; index < pending.length; index++) {
@@ -192,15 +241,20 @@ export async function scanTodo(
     if (index % 25 === 0) progress(nodes.size);
   }
 
-  const pendingRoots = new Set(
-    [...nodes.values()]
-      .filter(
-        (n) =>
-          n.parentRemId === pendingBucketId &&
-          (n.title.trim() || [...nodes.values()].some((c) => c.parentRemId === n.remId)),
-      )
-      .map((n) => n.remId),
-  );
+  const parents = new Set([...nodes.values()].map((node) => node.parentRemId));
+  const pendingRoots = new Set<string>();
+  const rootGroups: string[][] = [];
+  let group: string[] = [];
+  for (const node of nodes.values()) {
+    if (node.parentRemId !== pendingBucketId) continue;
+    if (hasBlankTitle(node) && !parents.has(node.remId)) {
+      group = [];
+      continue;
+    }
+    if (group.length === 0) rootGroups.push(group);
+    group.push(node.remId);
+    pendingRoots.add(node.remId);
+  }
   const marked = [...nodes.values()].filter((node) => {
     if (pendingRoots.has(node.remId)) return true;
     if (!isMarked(node.title)) return false;
@@ -237,10 +291,22 @@ export async function scanTodo(
       documentRemId,
       sourceDeliveryId: eventIdFor(documentRemId, node.remId),
       title: node.title,
-      prompt: renderTaskPrompt(nodes, node.remId, documentRemId, numbered),
-      subtreeFingerprint: fingerprintTaskNodes(nodes, node.remId, undefined, numbered),
+      prompt: renderTaskPrompt(
+        nodes,
+        node.remId,
+        documentRemId,
+        numbered || pendingRoots.has(node.remId),
+      ),
+      subtreeFingerprint: fingerprintTaskNodes(
+        nodes,
+        node.remId,
+        undefined,
+        numbered || pendingRoots.has(node.remId),
+      ),
     }));
-  return { tasks, conflicts: [...conflicts], nodeCount: nodes.size };
+  const byId = new Map(tasks.map((task) => [task.taskRemId, task]));
+  const pendingGroups = rootGroups.map((ids) => ids.map((id) => byId.get(id) as TodoTask));
+  return { tasks, pendingGroups, conflicts: [...conflicts], nodeCount: nodes.size };
 }
 
 /** Freeze the same source snapshot as the rendered command, including ordered descendant IDs. */

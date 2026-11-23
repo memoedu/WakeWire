@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   allChildren,
   eventIdFor,
+  isCommandSeparator,
   type RemNoteReader,
   scanTodo,
   type TodoReceipt,
@@ -9,6 +10,8 @@ import {
 } from "./remnote-todo.js";
 
 const RemId = z.string().regex(/^[A-Za-z0-9_-]+$/);
+const deferredBucket = "暂不处理";
+const deferredAliases = [deferredBucket, "暂时不", "暂时不做"];
 export const CommandSourceSchema = z.object({
   documentRemId: RemId,
   title: z.string().min(1),
@@ -85,7 +88,7 @@ export async function scanCommandSource(
   excludedIds.delete(source.documentRemId);
   const children = await allChildren(remnote, source.documentRemId);
   for (const node of children)
-    if (["已完成", "暂时不", "暂时不做", "凌晨处理"].includes(node.title.trim()))
+    if (["已完成", ...deferredAliases, "凌晨处理"].includes(node.title.trim()))
       excludedIds.add(node.remId);
   const pending = children.filter((n) => n.title.trim() === "待发送");
   if (pending.length > 1) throw new Error("document has multiple 待发送 buckets");
@@ -143,12 +146,20 @@ export async function ensureCommandBuckets(
 ): Promise<Record<string, string>> {
   const children = await allChildren(remnote, documentRemId),
     result: Record<string, string> = {};
-  for (const title of ["暂时不", "凌晨处理", "待发送"]) {
+  for (const title of [deferredBucket, "凌晨处理", "待发送"]) {
     const matches = children.filter((n) => n.title.trim() === title);
     if (matches.length > 1) throw new Error(`multiple ${title} buckets`);
-    const id = matches[0]?.remId ?? (await remnote.create(documentRemId, title));
+    const existing =
+      matches[0] ??
+      (title === deferredBucket
+        ? children.find((n) => deferredAliases.includes(n.title.trim()))
+        : undefined);
+    const id = existing?.remId ?? (await remnote.create(documentRemId, title));
     const node = await remnote.read(id);
-    if (node.parentRemId !== documentRemId || node.title.trim() !== title)
+    if (
+      node.parentRemId !== documentRemId ||
+      node.title.trim() !== (existing?.title.trim() ?? title)
+    )
       throw new Error("bucket readback mismatch");
     result[title] = id;
   }
@@ -161,14 +172,27 @@ export async function promoteOvernight(
 ): Promise<string[]> {
   const buckets = await ensureCommandBuckets(remnote, documentRemId),
     moved: string[] = [];
-  for (const node of await allChildren(remnote, buckets.凌晨处理 as string)) {
+  const source = buckets.凌晨处理 as string;
+  const destination = buckets.待发送 as string;
+  const overnight = await allChildren(remnote, source);
+  const first = overnight[0];
+  if (!first) return moved;
+  const previous = (await allChildren(remnote, destination)).at(-1);
+  if (
+    !(await isCommandSeparator(remnote, first)) &&
+    (!previous || !(await isCommandSeparator(remnote, previous)))
+  )
+    await remnote.create(destination, "");
+  for (const node of overnight) {
     if (node.parentRemId !== buckets.凌晨处理) continue;
-    await remnote.move(node.remId, buckets.待发送 as string, buckets.凌晨处理 as string);
+    await remnote.move(node.remId, destination, source);
     const after = await remnote.read(node.remId);
-    if (after.parentRemId !== buckets.待发送 || after.title !== node.title)
+    if (after.parentRemId !== destination || after.title !== node.title)
       throw new Error("overnight move readback mismatch");
     moved.push(node.remId);
   }
+  const last = (await allChildren(remnote, destination)).at(-1);
+  if (last && !(await isCommandSeparator(remnote, last))) await remnote.create(destination, "");
   return moved;
 }
 
