@@ -69,15 +69,17 @@ try{
   const bindings=read(values.bindings);assert(Array.isArray(bindings)&&bindings.length&&bindings.length<=20);
   assert(new Set(bindings.map(b=>b.sourceId)).size===bindings.length&&new Set(bindings.map(b=>b.draftId)).size===bindings.length);
   const scan=await scanArticles(reader,cfg.documentRemId,cfg.publishedTagRemId,cfg.aiGeneratedTagRemId);
-  const stats=await publisher.seriesStats(),clouds=[];let maxOrdinal=Math.max(stats.publishedCount,stats.maxOrdinal);
+  const stats=cfg.seriesStartDate?await publisher.seriesStats():null,clouds=[];let maxOrdinal=stats?Math.max(stats.publishedCount,stats.maxOrdinal):0;
   for(const binding of bindings){const cloud=await publisher.readDraft(binding.draftId);assert.equal(cloud.authorId,cfg.accountId);assert.equal(cloud.state,'draft');
    const text=JSON.parse(cloud.format).blocks.map(b=>b.text??'').join('\n');const found=/^第(\d+)篇\|day(\d+)$/mu.exec(text);if(found)maxOrdinal=Math.max(maxOrdinal,Number(found[1]));clouds.push({binding,cloud,existingOrdinal:found?Number(found[1]):undefined});}
-  const slot=nextPublicationSlot(new Date());const date=slot.slice(0,10);const day=(Date.parse(date+'T00:00:00Z')-Date.parse(cfg.seriesStartDate+'T00:00:00Z'))/86400000+1;assert(Number.isInteger(day)&&day>0);
+  const slot=nextPublicationSlot(new Date());const date=slot.slice(0,10);
+  const day=cfg.seriesStartDate?(Date.parse(date+'T00:00:00Z')-Date.parse(cfg.seriesStartDate+'T00:00:00Z'))/86400000+1:undefined;
+  if(cfg.seriesStartDate)assert(Number.isInteger(day)&&day>0);
   const pending=[];
   for(const item of clouds){
    const source=scan.sources.find(s=>s.remId===item.binding.sourceId);assert(source,'Source is no longer eligible');
    validateArticle(source,await publisher.prepare(source.nodes),state);
-   const seriesLabel=`第${item.existingOrdinal??++maxOrdinal} 篇 | day ${day}`;
+   const seriesLabel=day?`第${item.existingOrdinal??++maxOrdinal} 篇 | day ${day}`:undefined;
    const prepared=await publisher.prepare(source.nodes,'待发布',seriesLabel);
    const raw=await helper({action:'read-draft',id:item.binding.draftId});pending.push({...item,source,prepared,seriesLabel,rawBefore:raw});
   }
@@ -95,7 +97,7 @@ try{
     sync.drafts[fresh.remId]={draftId:saved.id,sourceBaseline:fresh,cloudBaseline:saved,seriesLabel:item.seriesLabel,lastPushAt:new Date().toISOString()};atomic(syncFile,sync);
     journal.drafts.at(-1).stage='verified';atomic(path.join(bundle,'push-journal.json'),journal);
    }
-   const result=await auditArticles({remnote:reader,publisher,documentRemId:cfg.documentRemId,accountId:cfg.accountId,columnId:cfg.columnId,state,save:()=>atomic(stateFile,state),now:new Date(),slot,seriesStartDate:cfg.seriesStartDate,publishedTagRemId:cfg.publishedTagRemId,aiGeneratedTagRemId:cfg.aiGeneratedTagRemId});
+   const result=await auditArticles({remnote:reader,publisher,documentRemId:cfg.documentRemId,accountId:cfg.accountId,columnId:cfg.columnId??'',state,save:()=>atomic(stateFile,state),now:new Date(),slot,seriesStartDate:cfg.seriesStartDate,publishedTagRemId:cfg.publishedTagRemId,aiGeneratedTagRemId:cfg.aiGeneratedTagRemId});
    for(const item of pending){
     const final=state.drafts.find(d=>d.source.remId===item.source.remId);
     const cloud=await publisher.readDraft(item.binding.draftId);

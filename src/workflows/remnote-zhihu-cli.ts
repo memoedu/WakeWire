@@ -16,13 +16,14 @@ import {
   type MentionBinding,
   nextPublicationSlot,
   publicationSlot,
+  resolveArticleColumns,
   reviewSlot,
   runArticles,
   type SeriesStats,
   saveReviewDraft,
   scanArticles,
 } from "./remnote-zhihu.js";
-import { underlineSnapshotContent } from "./remnote-zhihu-native.js";
+import { markedSnapshotContent } from "./remnote-zhihu-native.js";
 import {
   archivePreparedArticles,
   preparedPublicationSummary,
@@ -30,33 +31,46 @@ import {
 } from "./remnote-zhihu-publish.js";
 import { articleFeedback, auditArticles, reviewIssue } from "./remnote-zhihu-review.js";
 
-const Config = z.object({
-  documentRemId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
-  documentTitle: z.string().optional(),
-  knowledgeBaseId: z.string().min(1).optional(),
-  mcpUrl: z.url(),
-  python: z.string().min(1),
-  cookieSnapshot: z.string().min(1),
-  accountId: z.string().min(1),
-  columnId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
-  seriesStartDate: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/u)
-    .optional(),
-  publishedTagRemId: z
-    .string()
-    .regex(/^[A-Za-z0-9_-]+$/u)
-    .optional(),
-  aiGeneratedTagRemId: z
-    .string()
-    .regex(/^[A-Za-z0-9_-]+$/u)
-    .optional(),
-  mentionBindings: z
-    .array(z.object({ name: z.string().min(1).max(100), id: z.string().regex(/^[a-f0-9]{32}$/u) }))
-    .optional(),
-  requirePreflight: z.boolean().optional(),
-  controlledSync: z.boolean().optional(),
-});
+const ColumnId = z.string().regex(/^[A-Za-z0-9_-]+$/u);
+const ColumnIds = z.array(ColumnId).refine((ids) => new Set(ids).size === ids.length);
+const Config = z
+  .object({
+    documentRemId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
+    documentTitle: z.string().optional(),
+    knowledgeBaseId: z.string().min(1).optional(),
+    mcpUrl: z.url(),
+    python: z.string().min(1),
+    cookieSnapshot: z.string().min(1),
+    accountId: z.string().min(1),
+    columnId: ColumnId.optional(),
+    columnRouting: z.literal("tags").optional(),
+    seriesStartDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/u)
+      .optional(),
+    publishedTagRemId: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]+$/u)
+      .optional(),
+    aiGeneratedTagRemId: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]+$/u)
+      .optional(),
+    mentionBindings: z
+      .array(
+        z.object({ name: z.string().min(1).max(100), id: z.string().regex(/^[a-f0-9]{32}$/u) }),
+      )
+      .optional(),
+    requirePreflight: z.boolean().optional(),
+    controlledSync: z.boolean().optional(),
+  })
+  .refine(
+    (config) =>
+      config.columnRouting === "tags"
+        ? !config.columnId && !config.seriesStartDate && config.requirePreflight === true
+        : Boolean(config.columnId),
+    "choose one column routing mode; tag routing requires preflight",
+  );
 type Config = z.infer<typeof Config>;
 
 const ArticleRemSchema = z.object({
@@ -102,13 +116,9 @@ export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
       const node = snapshot.nodes[0];
       if (snapshot.nodes.length !== 1 || node?.remId !== remId)
         throw new Error("native rich text identity changed");
-      if (
-        !node.nativeSnapshot.text.some(
-          (p) => p && typeof p === "object" && "u" in p && typeof p.u === "boolean",
-        )
-      )
-        throw error;
-      return underlineSnapshotContent(node.nativeSnapshot.text, node.inlineRefs ?? []);
+      const content = markedSnapshotContent(node.nativeSnapshot.text, node.inlineRefs ?? []);
+      if (!content) throw error;
+      return content;
     }
     const result = z
       .object({ remId: z.string(), content: z.array(z.record(z.string(), z.unknown())) })
@@ -157,7 +167,16 @@ export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
 }
 
 export class ZhihuPublisher implements ArticlePublisher {
-  constructor(private readonly config: Config) {}
+  readonly columnsForTags?: (tags: string[]) => Promise<Array<{ id: string; title: string }>>;
+
+  constructor(private readonly config: Config) {
+    if (config.columnRouting === "tags") {
+      this.columnsForTags = async (tags) =>
+        z
+          .array(z.object({ id: ColumnId, title: z.string().min(1) }))
+          .parse(await this.call("columns-for-tags", { tags }));
+    }
+  }
   private async call<T>(
     action: string,
     args: Record<string, unknown> = {},
@@ -246,13 +265,14 @@ export class ZhihuPublisher implements ArticlePublisher {
       ...(this.config.mentionBindings ? { mentionBindings: this.config.mentionBindings } : {}),
     });
   }
-  check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }> {
+  check(): Promise<{ id: string; name: string; urlToken: string; columnId?: string }> {
     return this.call("check");
   }
   publish(title: string, html: string, draft?: ArticleDraft): Promise<{ id: string }> {
     return this.call("publish", {
       title,
       html,
+      ...(draft?.columnIds ? { columnIds: draft.columnIds } : {}),
       ...(draft?.draftId ? { draftId: draft.draftId, expected: draft.cloudBefore ?? draft } : {}),
     });
   }
@@ -428,7 +448,9 @@ function readState(file: string): ArticleState {
       !r.text ||
       !r.title ||
       !r.format ||
-      !r.columnId ||
+      (r.columnIds === undefined
+        ? !ColumnId.safeParse(r.columnId).success
+        : !ColumnIds.safeParse(r.columnIds).success || r.columnId !== (r.columnIds[0] ?? "")) ||
       !r.slot ||
       !["submitting", "published", "verified", "archived"].includes(r.stage) ||
       (r.stage !== "submitting" && !/^\d+$/u.test(r.articleId ?? ""))
@@ -454,6 +476,7 @@ function readState(file: string): ArticleState {
         !draft.html ||
         !draft.text ||
         !draft.format ||
+        (draft.columnIds !== undefined && !ColumnIds.safeParse(draft.columnIds).success) ||
         !["creating", "review", "ready", "published"].includes(draft.status) ||
         (draft.status !== "creating" && !/^\d+$/u.test(draft.draftId ?? ""))
       )
@@ -472,6 +495,7 @@ function readState(file: string): ArticleState {
             .regex(/^[a-f0-9]{64}$/u)
             .optional(),
           draftId: z.string().regex(/^\d+$/u).optional(),
+          columnIds: ColumnIds.optional(),
           editorUrl: z.string().optional(),
           status: z.enum(["approved", "blocked", "resolved", "withdrawn"]),
           issues: z.array(z.string()),
@@ -554,13 +578,14 @@ async function main(): Promise<void> {
         publisher,
         documentRemId: config.documentRemId,
         accountId: config.accountId,
-        columnId: config.columnId,
+        columnId: config.columnId ?? "",
         ...(config.publishedTagRemId ? { publishedTagRemId: config.publishedTagRemId } : {}),
         ...(config.aiGeneratedTagRemId ? { aiGeneratedTagRemId: config.aiGeneratedTagRemId } : {}),
         state,
         ...(config.requirePreflight ? { requirePreflight: true } : {}),
         save: () => atomicJson(stateFile, state),
       };
+      if (config.controlledSync && !fs.existsSync(stateFile)) shared.save();
       if (preparedPublication) {
         const revision =
           config.controlledSync && action !== "publish-now"
@@ -614,7 +639,8 @@ async function main(): Promise<void> {
       }
       const audit = action === "audit" || (action === "tick" && !publicationSlot(now));
       if (audit) {
-        if (!config.seriesStartDate) throw new Error("series start date is required for review");
+        if (!config.seriesStartDate && !config.columnRouting)
+          throw new Error("series start date is required for review");
         const recovered = await archivePreparedArticles({ ...shared, reader });
         const slot = reviewSlot(now) ?? nextPublicationSlot(now);
         const synchronization = config.controlledSync
@@ -624,7 +650,7 @@ async function main(): Promise<void> {
           ...shared,
           now,
           slot,
-          seriesStartDate: config.seriesStartDate,
+          ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
         });
         result.archived = recovered.archived;
         if (config.controlledSync) await controlledHook("seed", configFile, state);
@@ -644,11 +670,11 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "draft") {
-        if (!config.seriesStartDate)
+        if (!config.seriesStartDate && !config.columnRouting)
           throw new Error("series start date must be configured for preview");
         const result = await saveReviewDraft({
           ...shared,
-          seriesStartDate: config.seriesStartDate,
+          ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
           now: new Date(),
           ...(sourceRemId ? { sourceRemId } : {}),
           ...(articleId === "--new-version" ? { newVersion: true } : {}),
@@ -739,9 +765,15 @@ async function main(): Promise<void> {
       result.account = { name: account.name, urlToken: account.urlToken };
       result.columnId = account.columnId;
     }
-    if (action === "preview" && scan.sources[0]) {
-      const source = scan.sources[0];
-      const prepared = await publisher.prepare(source.nodes);
+    const source = scan.sources.find((item) => !sourceRemId || item.remId === sourceRemId);
+    if (action === "preview" && sourceRemId && !source)
+      throw new Error("no eligible marked source for preview");
+    if (action === "preview" && source) {
+      const prepared = await publisher.prepare(
+        source.nodes,
+        config.columnRouting ? "待发布" : undefined,
+      );
+      const columns = await resolveArticleColumns(publisher, source);
       const file = path.join(home, "preview.html");
       fs.writeFileSync(
         file,
@@ -751,11 +783,13 @@ async function main(): Promise<void> {
       atomicJson(path.join(home, "preview.json"), {
         sourceRemId: source.remId,
         fingerprint: source.fingerprint,
+        ...(columns ? { columns } : {}),
         ...prepared,
       });
       result.previewFile = file;
       result.characters = prepared.text.length;
       result.nodes = source.nodes.length;
+      if (columns) result.columns = columns;
     }
     console.log(JSON.stringify(result));
   } catch (error) {

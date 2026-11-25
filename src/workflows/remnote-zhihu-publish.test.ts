@@ -170,6 +170,47 @@ async function fixture() {
 }
 
 describe("prepared Zhihu publication without RemNote", () => {
+  it.each([{ ids: [] }, { ids: ["first", "second"] }])(
+    "publishes one unnumbered article with exactly $ids",
+    async ({ ids }) => {
+      const f = await fixture();
+      const draft = f.state.drafts?.[0];
+      const review = f.state.reviews?.[0];
+      if (!draft || !review) throw Error("missing draft or review");
+      draft.columnIds = ids;
+      review.columnIds = ids;
+      f.publisher.columnsForTags = async () => ids.map((id) => ({ id, title: id }));
+      f.publisher.check = async () => ({ id: "account", name: "Author", urlToken: "author" });
+      const verify = f.publisher.verify.bind(f.publisher);
+      f.publisher.verify = async (id) => ({ ...(await verify(id)), columnIds: [...ids].reverse() });
+      const publish = f.publisher.publish.bind(f.publisher);
+      f.publisher.publish = async (title, body, saved) => {
+        expect(saved?.columnIds).toEqual(ids);
+        return publish(title, body, saved);
+      };
+      const options = { ...f.options, columnId: "" };
+      expect(await publishPreparedArticles(options)).toMatchObject({ published: 1 });
+      expect(f.state.receipts[0]).toMatchObject({ columnIds: ids, stage: "verified" });
+      expect(f.state.receipts[0]?.seriesLabel).toBeUndefined();
+      expect(f.cloud.text).toContain("First published: 2026.11.15 11:30");
+      expect(await publishPreparedArticles(options)).toMatchObject({ status: "slot-consumed" });
+      expect(f.posts()).toBe(1);
+    },
+  );
+  it("does not submit a tag-routed draft if a frozen column match changes", async () => {
+    const f = await fixture();
+    const draft = f.state.drafts?.[0];
+    const review = f.state.reviews?.[0];
+    if (!draft || !review) throw Error("missing draft or review");
+    draft.columnIds = ["first", "second"];
+    review.columnIds = ["first", "second"];
+    f.publisher.columnsForTags = async () => [{ id: "first", title: "First" }];
+    await expect(publishPreparedArticles(f.options)).rejects.toThrow(
+      "approved article columns changed",
+    );
+    expect(f.posts()).toBe(0);
+    expect(f.state.receipts).toEqual([]);
+  });
   it("recovers a submitted article before audit and closes the stale ready-draft state without reposting", async () => {
     const f = await fixture();
     const verify = f.publisher.verify.bind(f.publisher);

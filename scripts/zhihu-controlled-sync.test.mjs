@@ -93,6 +93,16 @@ describe('controlled article sync ownership and recovery',()=>{
   expect(o.sync.articles['123'].sourceBaseline.fingerprint).toBe(o.sync.revisions['123'].source.fingerprint);
   expect((await publishControlled(o)).updated).toBe(0);expect(o.calls.update).toBe(1);
  });
+ it.each([[],['col','secondary']].map(ids=>({ids})))('keeps the article queue column set $ids during revision',async({ids})=>{
+  const o=await fixture();delete o.cfg.columnId;
+  o.state.receipts[0].columnIds=ids;o.state.receipts[0].columnId=ids[0]??'';
+  o.remote.contributions.splice(0,Infinity,...ids.map(id=>({state:'accepted',column:{id}})));
+  const update=o.publisher.updatePublished;
+  o.publisher.updatePublished=async args=>{expect(args.columnId).toBe(ids[0]??null);return update(args);};
+  expect((await auditControlled(o)).revisions).toBe(1);
+  expect((await publishControlled(o)).updated).toBe(1);
+  expect(o.state.receipts[0].columnIds).toEqual(ids);
+ });
  it('does not repeat an unknown publication result even at a later slot',async()=>{
   const o=await fixture();await auditControlled(o);o.publisher.updatePublished=async()=>{o.calls.update++;throw Error('timeout');};
   await publishControlled(o);expect(o.sync.revisions['123'].stage).toBe('submitting');expect(o.state.syncFeedback.issues).toBe(1);
