@@ -14,6 +14,7 @@ const marked = z
     l: z.boolean().optional(),
     u: z.boolean().optional(),
     q: z.boolean().optional(),
+    code: z.boolean().optional(),
     url: z.string().optional(),
     iUrl: z.string().optional(),
   })
@@ -23,16 +24,22 @@ const math = z
   .strict();
 const reference = z.object({ i: z.literal("q"), _id: z.string().min(1).max(128) }).strict();
 
-/** Read-only support for a known native mark while older rich-text bridges reject it. */
-export function underlineSnapshotContent(
+/** Convert known native marks that older rich-text bridges reject. */
+export function markedSnapshotContent(
   native: unknown[],
   refs: Array<{ targetRemId: string; text: string }>,
-): Array<Record<string, unknown>> {
+): Array<Record<string, unknown>> | undefined {
   if (
-    native.length > 1000 ||
-    !native.some((p) => p && typeof p === "object" && "u" in p && typeof p.u === "boolean")
+    !native.some(
+      (part) =>
+        part &&
+        typeof part === "object" &&
+        (("u" in part && typeof part.u === "boolean") ||
+          ("code" in part && typeof part.code === "boolean")),
+    )
   )
-    throw Error("native underline snapshot is unavailable");
+    return undefined;
+  if (native.length > 1000) throw Error("native rich text contains too many elements");
   let size = 0;
   const result = native.map((part): Record<string, unknown> => {
     if (typeof part === "string") {
@@ -48,7 +55,7 @@ export function underlineSnapshotContent(
         ...(p.b ? { bold: true } : {}),
         ...(p.l ? { italic: true } : {}),
         ...(p.u ? { underline: true } : {}),
-        ...(p.q ? { code: true } : {}),
+        ...(p.q || p.code ? { code: true } : {}),
       };
       const url = p.iUrl ?? p.url;
       if (!url) return content;
@@ -60,7 +67,7 @@ export function underlineSnapshotContent(
         [...url].some((c) => c.charCodeAt(0) <= 32 || c.charCodeAt(0) === 127 || c === "\\") ||
         (p.iUrl && p.url && p.iUrl !== p.url)
       )
-        throw Error("native underline link is unsupported");
+        throw Error("native rich text link is unsupported");
       return { type: "link", url, children: [content] };
     }
     const equation = math.safeParse(part);
@@ -72,12 +79,12 @@ export function underlineSnapshotContent(
     if (ref.success) {
       const matches = refs.filter((r) => r.targetRemId === ref.data._id);
       if (matches.length !== 1 || !matches[0]?.text || /\[\[|\]\]|\n/u.test(matches[0].text))
-        throw Error("native underline reference is unresolved");
+        throw Error("native rich text reference is unresolved");
       size += matches[0].text.length + 4;
       return { text: `[[${matches[0].text}]]` };
     }
-    throw Error("native underline contains an unsupported rich-text element");
+    throw Error("native snapshot contains an unsupported rich-text element");
   });
-  if (size > 12000) throw Error("native underline content exceeds supported size");
+  if (size > 12000) throw Error("native rich text exceeds supported size");
   return result;
 }

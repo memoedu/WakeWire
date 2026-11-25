@@ -17,6 +17,28 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_column_matching_is_exact_and_continues_across_pages(self):
+        client = MagicMock()
+        client._get.side_effect = [
+            {'data': [{'column': {'id': 'one', 'title': 'First'}}, {'column': {'id': 'ignored', 'title': 'Second chapter'}}],
+             'paging': {'is_end': False}},
+            {'data': [{'column': {'id': 'two', 'title': 'Second'}}], 'paging': {'is_end': True}},
+        ]
+        with patch.object(adapter, 'check_column', side_effect=[{'columnTitle': 'First'}, {'columnTitle': 'Second'}]) as check:
+            self.assertEqual(adapter.columns_for_tags(client, 'author', ['First', 'Second', 'Unrelated']),
+                             [{'id': 'one', 'title': 'First'}, {'id': 'two', 'title': 'Second'}])
+            self.assertEqual([call.args[1] for call in check.call_args_list], ['one', 'two'])
+            self.assertEqual(client._get.call_args.args[1]['offset'], 2)
+
+    def test_saved_draft_sends_complete_column_array_including_empty(self):
+        client = MagicMock()
+        client._content_publish.return_value = {'publish': {'id': '123'}}
+        for columns in ([], ['one', 'two']):
+            with self.subTest(columns=columns), patch.object(adapter, 'check_column'), patch.object(adapter, 'write_draft') as write:
+                adapter.publish_saved_draft(client, '123', 'Title', '<p>body</p>', None, 'owner', {}, columns)
+                write.assert_called_once()
+                self.assertEqual(client._content_publish.call_args.args[0]['data']['column']['column'], columns)
+
     def revision_fixture(self):
         article={'id':'123','title':'Original title','content':'<p>Original independently checked body</p>','state':'published','author':{'id':'owner'},'comment_permission':'all','title_image':'','contributions':[{'state':'accepted','column':{'id':'col'}}]}
         html='<p>A revised independently checked body</p>'
@@ -80,7 +102,7 @@ class AdapterTests(unittest.TestCase):
         client._get.side_effect=[article,{**article,'column':{'id':'col'}}]
         with patch.object(adapter,'read_draft',return_value=preview),patch.object(adapter,'publish_article_content') as publish:
             adapter.update_published(client,request,'owner')
-            self.assertEqual(publish.call_args.kwargs['revision_columns'],['col'])
+            self.assertEqual(publish.call_args.kwargs['columns'],['col'])
             self.assertEqual(adapter.accepted_column_ids(request['expectedPublic']),['col','secondary'])
     def test_series_metadata_stays_in_footer_with_plain_title_and_original_body(self):
         nodes=[{'text':'A plain title','depth':0},{'text':'Original body','depth':1}]

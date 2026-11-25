@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from requests.cookies import create_cookie
 from zhihu_cli.client import ZhihuClient
@@ -202,6 +202,35 @@ def check_column(client, column_id):
     return {"columnId": column_id, "columnTitle": column.get("title", "")}
 
 
+def columns_for_tags(client, url_token, tags):
+    names = set(tags)
+    if not names:
+        return []
+    url = f"https://www.zhihu.com/api/v4/members/{quote(url_token, safe='')}/column-contributions"
+    offset, seen, matched = 0, set(), {}
+    for _ in range(50):
+        page = client._get(url, {"limit": 20, "offset": offset})
+        items = page["data"]
+        for item in items:
+            column = item["column"]
+            token = str(column.get("url_token") or column["id"])
+            if token in seen:
+                raise ValueError("column_listing_duplicate")
+            seen.add(token)
+            title = column["title"]
+            if title in names:
+                verified = check_column(client, token)
+                if verified["columnTitle"] != title or title in matched:
+                    raise ValueError("column_title_ambiguous_or_changed")
+                matched[title] = token
+        if page["paging"]["is_end"] is True:
+            return [{"id": token, "title": title} for title, token in sorted(matched.items())]
+        if not items:
+            break
+        offset += len(items)
+    raise ValueError("column_listing_incomplete")
+
+
 def series_stats(client, column_id):
     check_column(client, column_id)
     column = client._get(f"https://zhuanlan.zhihu.com/api/columns/{column_id}")
@@ -275,14 +304,15 @@ def write_draft(client, article_id, title, html, account_id, expected):
     return saved
 
 
-def publish_saved_draft(client, article_id, title, html, column_id, account_id, expected):
-    check_column(client, column_id)
+def publish_saved_draft(client, article_id, title, html, column_id, account_id, expected, column_ids=None):
+    for token in column_ids if column_ids is not None else [column_id]:
+        check_column(client, token)
     write_draft(client, article_id, title, html, account_id, expected)
-    return publish_article_content(client, article_id, title, html, column_id)
+    return publish_article_content(client, article_id, title, html, column_id, columns=column_ids)
 
 
-def publish_article_content(client, article_id, title, html, column_id, is_published=False, revision_columns=None):
-    columns = revision_columns if revision_columns is not None else [column_id]
+def publish_article_content(client, article_id, title, html, column_id, is_published=False, columns=None):
+    columns = columns if columns is not None else [column_id]
     for token in columns:
         check_column(client, token)
     # Match the current first-party editor's article payload. The pinned
@@ -322,8 +352,10 @@ def publish_in_column(client, title, html, column_id):
 
 def revision_columns(actual, before, primary):
     expected = accepted_column_ids(before)
-    if primary not in expected or accepted_column_ids(actual) != expected:
+    if (expected and primary not in expected) or (not expected and primary) or accepted_column_ids(actual) != expected:
         raise ValueError('revision_public_columns_changed')
+    if not expected:
+        return []
     return [primary, *(column for column in expected if column != primary)]
 
 
@@ -364,7 +396,7 @@ def update_published(client, request, account_id):
         raise ValueError('revision_approval_changed')
     validate_links(request['html'])
     return publish_article_content(client, article_id, request['title'], request['html'], request['columnId'],
-                                   is_published=True, revision_columns=columns)
+                                   is_published=True, columns=columns)
 
 
 def restore_revision_column(client, request, account_id):
@@ -410,13 +442,16 @@ def main(request):
         if not account["id"] or not account["urlToken"]:
             raise ValueError("zhihu_account_unverified")
         if action == "check":
-            return {**account, **check_column(client, request["columnId"])}
+            return {**account, **(check_column(client, request["columnId"]) if request.get("columnId") else {})}
         if account["id"] != request["expectedAccountId"]:
             raise ValueError("zhihu_account_changed")
         if action == "series":
             return series_stats(client, request["columnId"])
+        if action == "columns-for-tags":
+            return columns_for_tags(client, account["urlToken"], request["tags"])
         if action == "create-draft":
-            check_column(client, request["columnId"])
+            if request.get("columnId"):
+                check_column(client, request["columnId"])
             return create_draft(client)
         if action == "read-draft":
             return read_draft(client, request["articleId"])
@@ -428,7 +463,7 @@ def main(request):
             return restore_revision_column(client, request, account['id'])
         if action == "publish":
             if request.get("draftId"):
-                return publish_saved_draft(client, request["draftId"], request["title"], request["html"], request["columnId"], account["id"], request["expected"])
+                return publish_saved_draft(client, request["draftId"], request["title"], request["html"], request.get("columnId"), account["id"], request["expected"], request.get("columnIds"))
             # One attempt only. The caller persists an unknown-result fence before this call.
             result = publish_in_column(client, request["title"], request["html"], request["columnId"])
             return {"id": article_id_from_result(result)}

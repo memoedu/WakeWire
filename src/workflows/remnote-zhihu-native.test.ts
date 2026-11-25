@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { ArticleRemNoteMcp } from "./remnote-zhihu-cli.js";
-import { underlineSnapshotContent } from "./remnote-zhihu-native.js";
+import { markedSnapshotContent } from "./remnote-zhihu-native.js";
 
-describe("native underline reads", () => {
+describe("native article marks", () => {
   it("preserves partial underline with other marks, links, equations and references", () => {
     expect(
-      underlineSnapshotContent(
+      markedSnapshotContent(
         [
           "Ordinary ",
           { i: "m", text: "marked", u: true, b: true, l: true },
@@ -30,7 +30,7 @@ describe("native underline reads", () => {
   it("does not broaden native support or discard unrecognized marks", () => {
     for (const extra of [{ h: "red" }, { u: "yes" }, { unknown: true }])
       expect(() =>
-        underlineSnapshotContent(
+        markedSnapshotContent(
           [
             { i: "m", text: "known", u: true },
             { i: "m", text: "other", ...extra },
@@ -38,15 +38,15 @@ describe("native underline reads", () => {
           [],
         ),
       ).toThrow();
-    expect(() => underlineSnapshotContent([{ i: "m", text: "plain" }], [])).toThrow();
-    expect(underlineSnapshotContent([{ i: "m", text: "cleared", u: false }], [])).toEqual([
+    expect(markedSnapshotContent([{ i: "m", text: "plain" }], [])).toBeUndefined();
+    expect(markedSnapshotContent([{ i: "m", text: "cleared", u: false }], [])).toEqual([
       { text: "cleared" },
     ]);
     expect(() =>
-      underlineSnapshotContent([{ i: "m", text: "link", u: true, url: "javascript:alert(1)" }], []),
+      markedSnapshotContent([{ i: "m", text: "link", u: true, url: "javascript:alert(1)" }], []),
     ).toThrow();
     expect(() =>
-      underlineSnapshotContent(
+      markedSnapshotContent(
         [
           { i: "m", text: "known", u: true },
           { i: "q", _id: "missing" },
@@ -79,6 +79,14 @@ describe("native underline reads", () => {
       { text: "underlined", underline: true },
     ]);
     expect(r.calls).toEqual(["personalwebsite_richtext", "personalwebsite_nodes"]);
+  });
+  it("preserves the native code alias without stripping adjacent plain text", async () => {
+    const r = new Reader();
+    r.native = [{ i: "m", text: "%", code: true }, " ordinary source text"];
+    expect(await r.richText("node")).toEqual([
+      { text: "%", code: true },
+      { text: " ordinary source text" },
+    ]);
   });
   it("retains the normal read path and refuses an unrelated failure or wrong identity", async () => {
     const r = new Reader();

@@ -1,6 +1,7 @@
 param(
     [string]$Config = 'D:\AppData\WakeWire\workflows\remnote-zhihu\config.json',
-    [string]$TaskName = 'WakeWire - RemNote Zhihu Articles'
+    [string]$TaskName = 'WakeWire - RemNote Zhihu Articles',
+    [switch]$Disabled
 )
 $ErrorActionPreference = 'Stop'
 if ((Get-TimeZone).Id -ne 'China Standard Time') { throw 'This schedule requires China Standard Time.' }
@@ -22,7 +23,7 @@ $triggers = @('09:30', '11:30', '15:30', '17:30', '20:30', '22:30' | ForEach-Obj
 })
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 # The CLI also enforces each window. Do not catch up missed publication slots.
-$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -WakeToRun -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5)
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -WakeToRun -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) -Disable:$Disabled
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
 # Registration does not execute a live publication.
 Get-ScheduledTaskInfo -TaskName $TaskName | Select-Object TaskName,NextRunTime,LastRunTime,LastTaskResult

@@ -54,6 +54,7 @@ export interface ArticleReceipt {
   mentionBindings?: MentionBinding[];
   articleId?: string;
   columnId: string;
+  columnIds?: string[];
   url?: string;
   archiveIssue?: string;
 }
@@ -86,6 +87,7 @@ export interface ArticleReview {
   checkedAt: string;
   fingerprint?: string;
   draftId?: string;
+  columnIds?: string[];
   editorUrl?: string;
   status: "approved" | "blocked" | "resolved" | "withdrawn";
   issues: string[];
@@ -109,6 +111,7 @@ export interface ArticleDraft {
   format: string;
   tableOfContents?: boolean;
   seriesLabel?: string;
+  columnIds?: string[];
   status: "creating" | "review" | "ready" | "published";
   draftId?: string;
   editorUrl?: string;
@@ -124,13 +127,35 @@ export function mentionIdentity(bindings?: MentionBinding[]): string {
   return JSON.stringify((bindings ?? []).map((binding) => [binding.name, binding.id]).sort());
 }
 
+export function sameColumnIds(left?: string[], right?: string[]): boolean {
+  if (!left || !right) return left === right;
+  return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+}
+
+export function verifyArticleColumns(
+  actual: string[],
+  expected: Pick<ArticleReceipt, "columnId" | "columnIds">,
+): boolean {
+  return expected.columnIds
+    ? sameColumnIds(actual, expected.columnIds)
+    : actual.includes(expected.columnId);
+}
+
+export async function resolveArticleColumns(
+  publisher: ArticlePublisher,
+  source: ArticleSource,
+): Promise<Array<{ id: string; title: string }> | undefined> {
+  if (!publisher.columnsForTags) return undefined;
+  return publisher.columnsForTags([...new Set(source.nodes[0]?.tags?.map((tag) => tag.name))]);
+}
+
 export async function saveReviewDraft(options: {
   remnote: ArticleReader;
   publisher: ArticlePublisher;
   documentRemId: string;
   accountId: string;
   columnId: string;
-  seriesStartDate: string;
+  seriesStartDate?: string;
   state: ArticleState;
   save: () => void;
   now: Date;
@@ -148,12 +173,7 @@ export async function saveReviewDraft(options: {
   moved: number;
 }> {
   const { publisher, remnote, state, save } = options;
-  if (
-    !publisher.seriesStats ||
-    !publisher.createDraft ||
-    !publisher.readDraft ||
-    !publisher.writeDraft
-  )
+  if (!publisher.createDraft || !publisher.readDraft || !publisher.writeDraft)
     throw new Error("cloud draft capabilities are unavailable");
   const scan = await scanArticles(
     remnote,
@@ -168,22 +188,28 @@ export async function saveReviewDraft(options: {
   );
   if (!source) throw new Error("no eligible marked source for draft preview");
   const base = await publisher.prepare(source.nodes, "待发布");
-  const numbered = seriesTitle(
-    base.title,
-    options.now,
-    options.seriesStartDate,
-    await publisher.seriesStats(),
-    state,
-  );
-  const seriesLabel =
-    state.drafts?.find((d) => d.source.remId === source.remId)?.seriesLabel ??
-    numbered.slice(numbered.lastIndexOf("（") + 1, -1);
+  let seriesLabel: string | undefined;
+  if (options.seriesStartDate) {
+    if (!publisher.seriesStats) throw new Error("series listing is unavailable");
+    const numbered = seriesTitle(
+      base.title,
+      options.now,
+      options.seriesStartDate,
+      await publisher.seriesStats(),
+      state,
+    );
+    seriesLabel =
+      state.drafts?.find((d) => d.source.remId === source.remId)?.seriesLabel ??
+      numbered.slice(numbered.lastIndexOf("（") + 1, -1);
+  }
+  const columns = await resolveArticleColumns(publisher, source);
   const prepared = {
-    ...(await publisher.prepare(source.nodes, "待发布", seriesLabel)),
-    seriesLabel,
+    ...(seriesLabel ? await publisher.prepare(source.nodes, "待发布", seriesLabel) : base),
+    ...(seriesLabel ? { seriesLabel } : {}),
+    ...(columns ? { columnIds: columns.map((column) => column.id) } : {}),
   };
   const account = await publisher.check();
-  if (account.id !== options.accountId || account.columnId !== options.columnId)
+  if (account.id !== options.accountId || (account.columnId ?? "") !== options.columnId)
     throw new Error("draft account or column changed");
   state.drafts ??= [];
   let draft = state.drafts.find((item) => item.source.remId === source.remId);
@@ -302,7 +328,8 @@ export interface ArticlePublisher {
     tableOfContents?: boolean;
     mentionBindings?: MentionBinding[];
   }>;
-  check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }>;
+  check(): Promise<{ id: string; name: string; urlToken: string; columnId?: string }>;
+  columnsForTags?(tags: string[]): Promise<Array<{ id: string; title: string }>>;
   publish(title: string, html: string, draft?: ArticleDraft): Promise<{ id: string }>;
   seriesStats?(): Promise<SeriesStats>;
   createDraft?(): Promise<{ id: string }>;
@@ -1096,12 +1123,18 @@ export async function adoptPublishedArticle(options: {
     throw new Error("manual source is not a pending marked subtree in the bound Document");
   const prepared = await publisher.prepare(source.nodes);
   const published = await publisher.verify(articleId);
+  const columns = await resolveArticleColumns(publisher, source);
+  const columnIds = columns?.map((column) => column.id);
+  const column = {
+    columnId: columnIds?.[0] ?? options.columnId,
+    ...(columnIds ? { columnIds } : {}),
+  };
   if (
     published.id !== articleId ||
     published.authorId !== options.accountId ||
     published.text !== prepared.text ||
     published.format !== prepared.format ||
-    !published.columnIds.includes(options.columnId) ||
+    !verifyArticleColumns(published.columnIds, column) ||
     published.url !== `https://zhuanlan.zhihu.com/p/${articleId}`
   )
     throw new Error(
@@ -1116,7 +1149,7 @@ export async function adoptPublishedArticle(options: {
     slot: `manual:${articleId}`,
     ...prepared,
     title: published.title,
-    columnId: options.columnId,
+    ...column,
     articleId,
     url: published.url,
     stage: "verified",

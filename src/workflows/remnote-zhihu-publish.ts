@@ -7,8 +7,11 @@ import {
   archiveArticle,
   mentionIdentity,
   publicationSlot,
+  resolveArticleColumns,
+  sameColumnIds,
   seriesTitle,
   validateArticle,
+  verifyArticleColumns,
 } from "./remnote-zhihu.js";
 
 export interface PreparedPublicationResult {
@@ -42,7 +45,7 @@ export async function recoverPreparedPublications(options: {
         actual.format !== receipt.format ||
         (receipt.tableOfContents !== undefined &&
           actual.tableOfContents !== receipt.tableOfContents) ||
-        !actual.columnIds.includes(receipt.columnId) ||
+        !verifyArticleColumns(actual.columnIds, receipt) ||
         actual.url !== `https://zhuanlan.zhihu.com/p/${receipt.articleId}`
       )
         throw new Error("published article readback mismatch");
@@ -134,6 +137,7 @@ export async function publishPreparedArticles(options: {
           r.sourceRemId === candidate.source.remId &&
           r.draftId === candidate.draftId &&
           r.fingerprint === candidate.source.fingerprint &&
+          sameColumnIds(r.columnIds, candidate.columnIds) &&
           r.slot < slot,
       )
       .sort((a, b) => b.slot.localeCompare(a.slot))
@@ -164,7 +168,8 @@ export async function publishPreparedArticles(options: {
           r.slot === slot &&
           r.sourceRemId === d.source.remId &&
           r.draftId === d.draftId &&
-          r.fingerprint === d.source.fingerprint,
+          r.fingerprint === d.source.fingerprint &&
+          sameColumnIds(r.columnIds, d.columnIds),
       ),
   );
   if (!draft) {
@@ -186,8 +191,16 @@ export async function publishPreparedArticles(options: {
   }
   if (!publisher.readDraft) throw new Error("cloud draft readback is unavailable");
   const account = await publisher.check();
-  if (account.id !== options.accountId || account.columnId !== options.columnId)
+  if (account.id !== options.accountId || (account.columnId ?? "") !== options.columnId)
     throw new Error("publishing account or column changed");
+  const columns = await resolveArticleColumns(publisher, draft.source);
+  if (
+    !sameColumnIds(
+      columns?.map((column) => column.id),
+      draft.columnIds,
+    )
+  )
+    throw new Error("approved article columns changed");
   const cloud = await publisher.readDraft(draft.draftId as string);
   if (
     cloud.id !== draft.draftId ||
@@ -203,7 +216,7 @@ export async function publishPreparedArticles(options: {
       ...draft,
       slot,
       articleId: draft.draftId as string,
-      columnId: options.columnId,
+      columnId: draft.columnIds?.[0] ?? options.columnId,
       stage: "published",
     };
     state.receipts.push(receipt);
@@ -276,7 +289,8 @@ export async function publishPreparedArticles(options: {
     firstPublishedAt,
     ...(seriesLabel ? { seriesLabel } : {}),
     articleId: draft.draftId as string,
-    columnId: options.columnId,
+    columnId: draft.columnIds?.[0] ?? options.columnId,
+    ...(draft.columnIds ? { columnIds: draft.columnIds } : {}),
     stage: "submitting",
   };
   state.receipts.push(receipt);

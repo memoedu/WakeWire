@@ -4,6 +4,7 @@ import {
   type ArticleReview,
   type ArticleState,
   mentionIdentity,
+  sameColumnIds,
   saveReviewDraft,
   scanArticles,
   snapshotArticle,
@@ -50,7 +51,7 @@ export async function auditArticles(options: {
   save: () => void;
   now: Date;
   slot: string;
-  seriesStartDate: string;
+  seriesStartDate?: string;
   publishedTagRemId?: string;
   aiGeneratedTagRemId?: string;
 }): Promise<{
@@ -128,12 +129,21 @@ export async function auditArticles(options: {
       );
       if (fresh.fingerprint !== source.fingerprint || fresh.parentRemId !== source.parentRemId)
         throw new Error("source changed during review");
+      if (
+        draft.columnIds &&
+        !sameColumnIds(
+          fresh.nodes[0]?.tags?.map((tag) => JSON.stringify([tag.tagRemId, tag.name])) ?? [],
+          draft.source.nodes[0]?.tags?.map((tag) => JSON.stringify([tag.tagRemId, tag.name])) ?? [],
+        )
+      )
+        throw new Error("source changed during review");
       draft.reviewMode = "automatic";
       draft.status = "ready";
       Object.assign(review, {
         title: saved.title,
         draftId: saved.id,
         editorUrl: saved.editorUrl,
+        ...(draft.columnIds ? { columnIds: draft.columnIds } : {}),
         status: "approved",
       });
       for (const prior of state.reviews)
