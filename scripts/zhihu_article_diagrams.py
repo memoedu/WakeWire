@@ -18,6 +18,7 @@ DIAGRAM_START = re.compile(
 )
 FENCED = re.compile(r"\A```mermaid[ \t]*\n(.*?)\n[ \t]*```[ \t]*\Z", re.I | re.S)
 IMAGE_FILENAME = re.compile(r"\A((?:v2-)?[a-f0-9]{32})(?:_(?:[0-9]+w|[a-z]+|[0-9]+x[0-9]+)|~resize:[0-9]+:q[0-9]+)?\.[a-z0-9]+\Z")
+DIAGRAM_LAYOUT_VERSION = 2
 
 
 def diagram_source(node):
@@ -79,7 +80,7 @@ def diagram_images(nodes, runtime, mode, upload, read):
     result = {}
     versions = [runtime["mermaidVersion"], runtime["playwrightVersion"]]
     for rem_id, diagram in sources:
-        key = hashlib.sha256(json.dumps([1, versions, diagram], ensure_ascii=False).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps([DIAGRAM_LAYOUT_VERSION, versions, diagram], ensure_ascii=False).encode()).hexdigest()
         png = cache / (key + ".png")
         metadata = cache / (key + ".json")
         if mode != "local" and metadata.is_file():
