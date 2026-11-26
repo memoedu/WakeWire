@@ -1,16 +1,20 @@
 """Narrow, JSON-only adapter for pyzhihu-cli; never persist or print cookies."""
 
+import hashlib
 import json
 import logging
 import re
 import sys
 import time
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
 from requests.cookies import create_cookie
-from zhihu_cli.client import ZhihuClient
+from PIL import Image
+from zhihu_cli.client import ZHIHU_IMAGE_API, ZhihuClient
+from zhihu_article_diagrams import diagram_images
 from zhihu_article_format import (
     ArticleLayout,
     VisibleText,
@@ -51,8 +55,8 @@ def validate_links(html):
             raise ValueError("article_link_unsupported")
 
 
-def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, mention_bindings=None, series_label=None):
-    result = prepare_layout(nodes, first_published_at, ai_generated_tag_rem_id)
+def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, mention_bindings=None, series_label=None, diagrams=None):
+    result = prepare_layout(nodes, first_published_at, ai_generated_tag_rem_id, diagrams)
     if series_label is not None:
         if not isinstance(series_label, str) or not re.fullmatch(r"第[1-9]\d* 篇 \| day [1-9]\d*", series_label) or first_published_at is None:
             raise ValueError("article_series_footer_invalid")
@@ -111,7 +115,7 @@ def resolve_mentions(client, names, configured):
     return result
 
 
-def load_client(snapshot_path):
+def load_client(snapshot_path, article_images=False):
     snapshot = json.loads(Path(snapshot_path).read_text(encoding="utf-8-sig"))
     if snapshot.get("schema") != "local.chrome-cookie-snapshot" or snapshot.get("schemaVersion") != 1:
         raise ValueError("cookie_snapshot_schema_mismatch")
@@ -146,13 +150,65 @@ def load_client(snapshot_path):
 
     def scoped_request(method, url, **kwargs):
         parsed = urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname not in ("www.zhihu.com", "zhuanlan.zhihu.com"):
+        media = article_images and parsed.netloc == "api.zhihu.com" and not (parsed.query or parsed.fragment) and (
+            (method.upper() == "POST" and parsed.path == "/images") or
+            (method.upper() == "GET" and re.fullmatch(r"/images/[A-Za-z0-9_-]+", parsed.path)) or
+            (method.upper() == "PUT" and re.fullmatch(r"/images/[A-Za-z0-9_-]+/uploading_status", parsed.path))
+        )
+        if parsed.scheme != "https" or (parsed.hostname not in ("www.zhihu.com", "zhuanlan.zhihu.com") and not media):
             raise ValueError("zhihu_request_host_blocked")
         kwargs["allow_redirects"] = False
         return original_request(method, url, **kwargs)
 
     client._session.request = scoped_request
     return client
+
+
+def upload_article_image(client, filename):
+    """Complete the current Zhihu editor protocol before invoking the SDK poller."""
+    file = Path(filename)
+    data = file.read_bytes()
+    with Image.open(file) as image:
+        width, height = image.size
+        if image.format != "PNG" or width < 1 or height < 1:
+            raise ValueError("article_image_invalid_png")
+    registered = client._session.post(ZHIHU_IMAGE_API, json={
+        "image_hash": hashlib.md5(data, usedforsecurity=False).hexdigest(), "source": "article",
+    }, timeout=15)
+    if registered.status_code != 200:
+        raise ValueError("article_image_registration_failed")
+    result = registered.json()
+    upload = result["upload_file"]
+    image_id = str(upload["image_id"])
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", image_id):
+        raise ValueError("article_image_id_invalid")
+    if upload["state"] == 2:
+        client._upload_to_oss(upload["object_key"], data, result["upload_token"])
+        acknowledged = client._session.put(f"{ZHIHU_IMAGE_API}/{image_id}/uploading_status",
+                                            json={"upload_result": "success"}, timeout=15)
+        if acknowledged.status_code not in (200, 204):
+            raise ValueError("article_image_confirmation_failed")
+    elif upload["state"] != 1:
+        raise ValueError("article_image_registration_unknown")
+    return {**read_article_image(client, image_id), "imageId": image_id, "width": width, "height": height}
+
+
+def read_article_image(client, image_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", image_id):
+        raise ValueError("article_image_id_invalid")
+    info = client._poll_image(image_id)
+    for name in ("src", "original_src", "watermark_src"):
+        address = info.get(name)
+        if address:
+            parsed = urlparse(address)
+            if not Path(parsed.path).suffix:
+                address = parsed._replace(path=parsed.path + ".png").geturl()
+        if address and address.startswith("//"):
+            address = "https:" + address
+        if address:
+            info[name] = address
+    info["src"] = info.get("original_src") or info["src"]
+    return info
 
 
 def article_id_from_result(result):
@@ -424,15 +480,24 @@ def restore_revision_column(client, request, account_id):
 def main(request):
     action = request["action"]
     if action == "prepare":
-        base = prepare_layout(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"))
-        names = mention_names(base["html"])
-        bindings = []
-        if names:
-            with load_client(request["snapshotPath"]) as client:
-                if client.get_self_info().get("id") != request["expectedAccountId"]:
-                    raise ValueError("account_changed")
-                bindings = resolve_mentions(client, names, request.get("mentionBindings", []))
-        result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), bindings, request.get("seriesLabel"))
+        with ExitStack() as stack:
+            client = None
+
+            def checked_client():
+                nonlocal client
+                if client is None:
+                    client = stack.enter_context(load_client(request["snapshotPath"], article_images=request.get("diagramMode") in ("upload", "cache")))
+                    if client.get_self_info().get("id") != request["expectedAccountId"]:
+                        raise ValueError("account_changed")
+                return client
+
+            diagrams = diagram_images(request["nodes"], request.get("diagrams"), request.get("diagramMode", "cache"),
+                                      lambda path: upload_article_image(checked_client(), path),
+                                      lambda image_id: read_article_image(checked_client(), image_id))
+            base = prepare_layout(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), diagrams)
+            names = mention_names(base["html"])
+            bindings = resolve_mentions(checked_client(), names, request.get("mentionBindings", [])) if names else []
+            result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), bindings, request.get("seriesLabel"), diagrams)
         validate_links(result["html"])
         return result
     with load_client(request["snapshotPath"]) as client:
