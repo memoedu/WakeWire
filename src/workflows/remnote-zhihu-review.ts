@@ -23,6 +23,7 @@ export function reviewIssue(error: unknown): string {
       "知乎草稿已有人工修改或仍待人工审核，已保留您的修改。",
     ],
     [/hierarchy|list levels/u, "正文层级超出知乎可保真显示范围。"],
+    [/mermaid|article_image/u, "Mermaid 图渲染、上传或回读未通过，原稿已保留。"],
     [/table_of_contents/u, "知乎原生目录设置未通过保存核验，已暂停该篇发布。"],
     [/link_card/u, "知乎卡片的类型、目标地址或标题未通过核验，已暂停该篇发布。"],
     [/equation|latex|math/iu, "公式数据或 LaTeX 保真核验失败，已暂停该篇发布。"],

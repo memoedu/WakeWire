@@ -63,6 +63,16 @@ const Config = z
       .optional(),
     requirePreflight: z.boolean().optional(),
     controlledSync: z.boolean().optional(),
+    diagrams: z
+      .object({
+        modules: z.string().refine(path.isAbsolute),
+        browserExecutable: z.string().refine(path.isAbsolute),
+        node: z.string().refine(path.isAbsolute),
+        cache: z.string().refine(path.isAbsolute),
+        mermaidVersion: z.string().min(1),
+        playwrightVersion: z.string().min(1),
+      })
+      .optional(),
   })
   .refine(
     (config) =>
@@ -169,7 +179,10 @@ export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
 export class ZhihuPublisher implements ArticlePublisher {
   readonly columnsForTags?: (tags: string[]) => Promise<Array<{ id: string; title: string }>>;
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly diagramMode: "local" | "upload" | "cache" = "cache",
+  ) {
     if (config.columnRouting === "tags") {
       this.columnsForTags = async (tags) =>
         z
@@ -203,10 +216,14 @@ export class ZhihuPublisher implements ArticlePublisher {
         if (error) reject(error);
         else resolve(value as T);
       };
+      const timeout =
+        action === "prepare" && this.config.diagrams && this.diagramMode !== "cache"
+          ? 300000
+          : 90000;
       const timer = setTimeout(() => {
         child.kill();
         finish(new Error("Zhihu client timed out; never replay a publish"));
-      }, 90000);
+      }, timeout);
       child.on("error", () => finish(new Error("Zhihu client could not start")));
       child.stdin.on("error", () => finish(new Error("Zhihu client input failed")));
       child.stdout.on("data", (data: string) => {
@@ -263,6 +280,9 @@ export class ZhihuPublisher implements ArticlePublisher {
         ? { aiGeneratedTagRemId: this.config.aiGeneratedTagRemId }
         : {}),
       ...(this.config.mentionBindings ? { mentionBindings: this.config.mentionBindings } : {}),
+      ...(this.config.diagrams
+        ? { diagrams: this.config.diagrams, diagramMode: this.diagramMode }
+        : {}),
     });
   }
   check(): Promise<{ id: string; name: string; urlToken: string; columnId?: string }> {
@@ -566,7 +586,13 @@ async function main(): Promise<void> {
     if (["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action))
       activeState = readState(path.join(home, "state.json"));
     if (!preparedPublication && action !== "approve-draft") await reader();
-    const publisher = new ZhihuPublisher(config);
+    const diagramMode =
+      action === "preview"
+        ? "local"
+        : preparedPublication || action === "adopt"
+          ? "cache"
+          : "upload";
+    const publisher = new ZhihuPublisher(config, diagramMode);
     if (
       ["run", "tick", "audit", "publish-now", "adopt", "draft", "approve-draft"].includes(action)
     ) {

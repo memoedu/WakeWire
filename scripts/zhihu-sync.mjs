@@ -28,7 +28,7 @@ const run=(program,args,input)=>new Promise((resolve,reject)=>{
  child.stderr.resume();child.on('error',reject);child.on('close',code=>{clearTimeout(timer);if(code!==0)return reject(Error('Sync helper failed; inspect bundle and known state'));resolve(out);});child.stdin.end(input?JSON.stringify(input):undefined);
 });
 const helper=async request=>{const result=JSON.parse(await run(cfg.python,[path.join(scripts,'zhihu_sync.py')],{configFile,...request}));assert(result.ok,result.error);return result.data;};
-const publisher=new ZhihuPublisher(cfg);
+const publisher=new ZhihuPublisher(cfg,values.apply?'upload':'local');
 publisher.publish=async()=>{throw Error('Directional sync never publishes articles');};
 const reader=new ArticleRemNoteMcp();
 let lockOwned=false;

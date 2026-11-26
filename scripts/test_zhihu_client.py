@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from zhihu_cli.client import ZhihuClient
+from zhihu_article_diagrams import diagram_source, image_html, diagram_images
 from zhihu_outline_overflow import overflow_spaces
 
 spec = importlib.util.spec_from_file_location("zhihu_adapter", Path(__file__).with_name("zhihu-client.py"))
@@ -17,6 +18,47 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def test_emoji_sequences_stay_literal_and_round_trip_with_native_layout(self):
+        source = "标记 😂，组合 👩🏽‍💻，变体 ❤️，国旗 🇨🇳"
+        nodes = [{"text": "标题", "depth": 0}, {"text": source, "depth": 1, "richText": [{"text": source}]}]
+        prepared = adapter.prepare(nodes)
+        self.assertIn(source, prepared["html"])
+        self.assertEqual(prepared["format"], adapter.format_structure(prepared["html"].replace("😂", "&#128514;")))
+        self.assertNotEqual(prepared["format"], adapter.format_structure(prepared["html"].replace("\ufe0f", "")))
+
+    def test_detects_standalone_mermaid_without_formatting_surrounding_prose(self):
+        diagram = 'flowchart TD\n  a["需求"] --> b["实现"]'
+        self.assertEqual(diagram_source({"text": diagram}), diagram)
+        self.assertEqual(diagram_source({"text": "```mermaid\n" + diagram + "\n```"}), diagram)
+        broken_fence = [{"text": "-", "code": True}, {"text": "mermaid\n  " + diagram}]
+        self.assertEqual(diagram_source({"text": "", "richText": broken_fence}), diagram)
+        self.assertIsNone(diagram_source({"text": "flowchart 是 Mermaid 的图形类型。\n后续说明。"}))
+        with self.assertRaisesRegex(ValueError, "mermaid_mixed_format"):
+            diagram_source({"text": "前置段落\n```mermaid\n" + diagram + "\n```"})
+
+    def test_images_are_atomic_blocks_and_readback_checks_exact_order_and_identity(self):
+        key = '36a9' * 8
+        url = 'https://picx.zhimg.com/v2-' + key + '_r.jpg'
+        nodes = [{"text": "标题", "depth": 0}, {"text": "流程前的说明文字", "depth": 1},
+                 {"text": "flowchart LR\na --> b", "depth": 2, "remId": "node"},
+                 {"text": "流程后的补充说明", "depth": 2}]
+        prepared = adapter.prepare(nodes, diagrams={"node": image_html({"src": url})})
+        self.assertNotIn('flowchart', prepared['html'])
+        blocks = json.loads(prepared['format'])['blocks']
+        self.assertEqual([b['kind'] for b in blocks], ['item', 'image', 'item'])
+        self.assertEqual(blocks[-1]['depth'], 2)
+        self.assertEqual(prepared['format'], adapter.format_structure(prepared['html'].replace('picx.', 'pic1.').replace('_r.jpg', '_1440w.jpg')))
+        private = 'https://pic-private.zhihu.com/v2-' + key + '~resize:0:q75.png?fixture=signature'
+        self.assertEqual(prepared['format'], adapter.format_structure(prepared['html'].replace(url, private)))
+        self.assertNotEqual(prepared['format'], adapter.format_structure(prepared['html'].replace(key, 'b' * 32)))
+
+    def test_diagram_images_require_an_explicit_runtime(self):
+        nodes = [{"text": "Title"}, {"remId": "d", "text": "flowchart LR\na --> b"}]
+        upload = MagicMock()
+        with self.assertRaisesRegex(ValueError, "renderer_not_configured"):
+            diagram_images(nodes, None, "cache", upload, MagicMock())
+        upload.assert_not_called()
+
     def test_column_matching_is_exact_and_continues_across_pages(self):
         client = MagicMock()
         client._get.side_effect = [
@@ -495,6 +537,41 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "host_blocked"):
             client._session.request("GET", "https://example.com/")
         client.close()
+
+    def test_article_media_client_only_adds_registration_and_status_endpoints(self):
+        with patch.object(Path, "read_text", return_value=self.snapshot()), \
+             patch("requests.sessions.Session.request") as send:
+            with adapter.load_client("synthetic.json", article_images=True) as client:
+                client._session.post("https://api.zhihu.com/images", json={})
+                client._session.get("https://api.zhihu.com/images/42")
+                client._session.put("https://api.zhihu.com/images/42/uploading_status", json={"upload_result": "success"})
+                self.assertTrue(all(call.kwargs["allow_redirects"] is False for call in send.call_args_list))
+                with self.assertRaisesRegex(ValueError, "host_blocked"):
+                    client._session.post("https://api.zhihu.com/something-else", json={})
+            with adapter.load_client("synthetic.json") as client:
+                with self.assertRaisesRegex(ValueError, "host_blocked"):
+                    client._session.post("https://api.zhihu.com/images", json={})
+
+    def test_article_upload_acknowledges_object_storage_before_polling(self):
+        client = MagicMock()
+        client._session.post.return_value.status_code = 200
+        client._session.post.return_value.json.return_value = {
+            'upload_file': {'image_id': '7', 'object_key': 'fixture', 'state': 2}, 'upload_token': {'test': 'token'},
+        }
+        client._session.put.return_value.status_code = 200
+        client._poll_image.return_value = {'src': 'https://picx.zhimg.com/v2-' + 'a' * 32,
+                                           'original_src': '//picx.zhimg.com/v2-' + 'a' * 32}
+        image = MagicMock()
+        image.__enter__.return_value.size = (500, 400)
+        image.__enter__.return_value.format = 'PNG'
+        with patch.object(Path, 'read_bytes', return_value=b'fixture'), patch.object(adapter.Image, 'open', return_value=image):
+            result = adapter.upload_article_image(client, 'fixture.png')
+        methods = [entry[0] for entry in client.mock_calls]
+        self.assertLess(methods.index('_upload_to_oss'), methods.index('_session.put'))
+        self.assertLess(methods.index('_session.put'), methods.index('_poll_image'))
+        client._session.put.assert_called_once_with('https://api.zhihu.com/images/7/uploading_status',
+                                                   json={'upload_result': 'success'}, timeout=15)
+        self.assertEqual(result['src'], 'https://picx.zhimg.com/v2-' + 'a' * 32 + '.png')
 
     def test_stale_snapshot_cannot_reuse_logged_out_or_disconnected_auth(self):
         with patch.object(Path, "read_text", return_value=self.snapshot(age=1000)):

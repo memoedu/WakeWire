@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from urllib.parse import quote, parse_qs, urlparse
 
 from markdown_it import MarkdownIt
+from zhihu_article_diagrams import image_identity
 from zhihu_outline_overflow import overflow_spaces
 
 
@@ -340,13 +341,13 @@ def canonical_cards(html):
 
 
 class LiftGaps(HTMLParser):
-    """Native gaps and standalone cards must be outside every list container."""
+    """Lift native gaps and standalone atomic blocks out of list containers."""
     def __init__(self):
         super().__init__(convert_charrefs=False)
         self.parts, self.lists, self.in_gap, self.in_card = [], [], False, False
 
     def handle_starttag(self, tag, attrs):
-        if tag == "div" and dict(attrs).get("data-outline-card") == "1":
+        if tag == "div" and dict(attrs).get("data-outline-atomic") == "1":
             self.parts.extend("</" + item + ">" for item in reversed(self.lists))
             self.in_card = True
             return
@@ -410,6 +411,13 @@ class ArticleLayout(HTMLParser):
         if formula:
             self.styles.append(["math", formula[0], formula[1], self.visible_offset])
             self.handle_data("$" + formula[1] + "$")
+            return
+        if tag == "img":
+            at = dict(attrs)
+            url = at.get("src") or at.get("data-original-src") or at.get("data-original", "")
+            identity = image_identity(url)
+            self.events.append({"kind": "image", "depth": len(self.lists), "image": identity})
+            self.styles.append(["image", identity, self.visible_offset])
             return
         if tag in ("ul", "ol"):
             self.lists.append(tag)
@@ -503,7 +511,7 @@ def format_structure(html):
     return json.dumps({"version": 2, "blocks": parser.events, "styles": parser.styles}, ensure_ascii=False)
 
 
-def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
+def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, diagrams=None):
     """Blank Rems are paragraph separators; real Rems are list items; LF stays LF."""
     md = MarkdownIt("commonmark", {"html": False, "breaks": True})
     md.inline.ruler.before("escape", "zhihu_math", math_inline)
@@ -529,7 +537,7 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
             raise ValueError("article_outline_depth")
         del stack[depth:]
         ai = tagged(node)
-        current = {"text": node["text"], "children": [], "ai": ai or stack[-1]["ai"], "ai_start": ai and not stack[-1]["ai"], "native": node.get("richText"), "refs": node.get("inlineRefs", [])}
+        current = {"text": node["text"], "children": [], "ai": ai or stack[-1]["ai"], "ai_start": ai and not stack[-1]["ai"], "native": node.get("richText"), "refs": node.get("inlineRefs", []), "diagram": (diagrams or {}).get(node.get("remId"))}
         stack[-1]["children"].append(current)
         stack.append(current)
 
@@ -577,11 +585,16 @@ def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None):
             # places the child <ul> after the closed <li>, at the same level.
             # Emit that representation so a hierarchy return is not a blank Rem.
             badge = ai_badge() if node["ai_start"] else ""
+            if node["diagram"]:
+                flush()
+                result.append('<div data-outline-atomic="1">' + ("<p>" + badge + "</p>" if badge else "") + node["diagram"] + '</div>')
+                result.append(("" if headings else "<ul>") + render_level(node["children"]) + ("" if headings else "</ul>"))
+                continue
             body = native_html(node["native"], node["refs"]) if node["native"] is not None else inline_or_blocks(node["text"])
             card = standalone_card(body) if not node["children"] and "\n" not in node["text"] and "\r" not in node["text"] else None
             if card:
                 flush()
-                result.append('<div data-outline-card="1">' + ("<p>" + badge + "</p>" if badge else "") + card + '</div>')
+                result.append('<div data-outline-atomic="1">' + ("<p>" + badge + "</p>" if badge else "") + card + '</div>')
                 continue
             if headings:
                 flush()

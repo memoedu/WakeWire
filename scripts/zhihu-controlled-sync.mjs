@@ -258,7 +258,7 @@ async function main(){
  const cfg=read(configFile),stateFile=path.join(home,'state.json'),syncFile=path.join(home,'sync-state.json');
  const state=read(stateFile),sync=fs.existsSync(syncFile)?read(syncFile):{version:2,articles:{},drafts:{}};sync.version=2;
  const atomic=(file,value)=>{const temp=file+`.${process.pid}.tmp`;const fd=fs.openSync(temp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(temp,file);};
- const publisher=new ZhihuPublisher(cfg),reader=new ArticleRemNoteMcp();
+ const publisher=new ZhihuPublisher(cfg,action==='audit'?'upload':'cache'),reader=new ArticleRemNoteMcp();
  const options={cfg,state,sync,publisher,reader,slot,saveState:()=>atomic(stateFile,state),saveSync:()=>atomic(syncFile,sync),
   currentSlot:()=>publicationSlot(new Date()),
   bundle:id=>{const dir=path.join(home,'sync-runs',`${Date.now()}-${id}`);fs.mkdirSync(dir,{recursive:true});return dir;},
