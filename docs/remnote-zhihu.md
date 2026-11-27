@@ -8,6 +8,8 @@
 
 文章队列使用 `WakeWire - RemNote Zhihu Library Articles`。给任务安装脚本传入独立的 `-Config` 和 `-TaskName`，需要先验收时用 `-Disabled`。本地预览可指定准确来源，例 `node dist/workflows/remnote-zhihu-cli.js preview <absolute-config.json> <source-rem-id>`。
 
+Windows 注册器用现有 `pythonw.exe` 和 DeveloperGovernance 的 `run-hidden.pyw` 启动 PowerShell。更新现役任务时可指定准确的 `-TaskName`、`-Config`、`-RuntimeRoot` 和 `-Pythonw`，并使用 `-UpdateActionOnly` 保留原时段、启用状态与发布账本。任务结果继续使用原脚本退出码。
+
 将配置指定的 RemNote Document 直属第一层母节点中行首单个 `%` 标记的节点及其完整物理子树发布为一篇知乎文章。标记母节点自身的可见文字作为文章标题，其下完整物理子树作为正文。用固定 Rem ID 绑定真实 Document，同一 Document 改名不改变发布范围，也不匹配同名普通节点。按直属母节点顺序处理，不进入未标记母节点内部查找 `%`，正文中以 `%` 开头的节点保留为正文，不作为独立稿件。不附带父项或兄弟项，不摘要、改写或添加话题。母节点 `%%` 暂停该稿件；「已发布」子树完全排除。
 
 配置 `publishedTagRemId` 后，同一次扫描还会按该 Document 的精确 Rem ID 查询直接使用它作 tag 的节点。外部母节点必须同时具有这个 tag 和行首单个 `%`；只有 tag 时保留为待写内容，只有 `%` 时不扩展到无关位置。母节点自身作为标题，完整物理子树作为正文；支持其他 Document 内及知识库根级的位置。按原 Document 内容优先、外部节点 ID 稳定排序并入同一队列，共享原时段、锁和去重回执。Document 内的同一节点即使也带 tag，仍只按原 Document 流程处理一次；嵌套就绪来源、截断的 tag 搜索及异常分页会被拦截。

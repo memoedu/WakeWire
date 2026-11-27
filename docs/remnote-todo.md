@@ -2,6 +2,8 @@
 
 Windows 计划任务 `WakeWire - RemNote Todo 0200` 每天北京时间 01:00 将各 Document 的“凌晨处理”全部子节点移入“待发送”，02:00、11:00、17:00 运行定时发送。任务名称保留以沿用现有入口，仍由 `scripts/run-remnote-todo.ps1` 执行，统一纳入决策工作台的“运行与调度”。“暂不处理”用于手工暂存，旧名称也受同样的排除规则保护。
 
+Windows 注册器用现有 `pythonw.exe` 和 DeveloperGovernance 的 `run-hidden.pyw` 启动 PowerShell，计划任务接收原工作流的退出码。现役任务可用 `install-remnote-todo-task.ps1 -UpdateActionOnly` 更新动作，按实际安装位置传入 `-RuntimeRoot` 和 `-Pythonw`，保留原触发、用户和配置。原生 Thread 归属仍使用原桌面接口。
+
 普通入口绑定「一次性命令」的固定 Document ID。配置 `maintenanceDocumentsFile` 后，从维护根的直接 Document 实时发现当前身份和标题；保存的映射只补充 Context 和旧投递身份。所有入口复用同一个扫描、原文导出、去重、投递和受理归位实现，共享同一路由的四路并发。Context 与工程收尾要求通过原生 `thread/start.developerInstructions` 单独传入，用户消息仍为原文。Document 对应关系只提供检索起点，允许任务必要的跨项目协作。绑定见 [项目维护](remnote-maintenance.md)。
 
 每个入口 Document 都具有“暂不处理”“凌晨处理”“待发送”。“待发送”的连续一级节点及各自子树按原顺序合为一批，遇到同级空叶节点即另起一批。删掉两条命令之间的空节点，或把命令移成一段连续内容，下次扫描时就会合为同一批。每组独立等待修复并发送到各自的 Thread。普通入口没有待发送事项时，沿用原来逐项派发 `%` 的行为。已完成及暂存分支不参与派发。
