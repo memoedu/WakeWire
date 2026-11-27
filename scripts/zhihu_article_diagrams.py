@@ -67,7 +67,15 @@ def image_html(info):
     return "<figure><img " + " ".join(f'{key}="{escape(value, quote=True)}"' for key, value in attributes.items()) + "/></figure>"
 
 
-def diagram_images(nodes, runtime, mode, upload, read):
+def run_diagram_renderer(runtime, diagram, output):
+    request = {**runtime, "diagram": diagram, "output": str(output)}
+    subprocess.run([runtime["node"], str(Path(__file__).with_name("zhihu-diagram-render.mjs"))],
+                   input=json.dumps(request).encode(), stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=40, check=True,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def diagram_images(nodes, runtime, mode, upload, read, render_remote=None):
     sources = [(node["remId"], source) for node in nodes[1:] if (source := diagram_source(node)) is not None]
     if not sources:
         return {}
@@ -95,11 +103,8 @@ def diagram_images(nodes, runtime, mode, upload, read):
         if not png.is_file():
             temp = cache / (key + f".{os.getpid()}.png")
             try:
-                request = {**runtime, "diagram": diagram, "output": str(temp)}
-                subprocess.run([runtime["node"], str(Path(__file__).with_name("zhihu-diagram-render.mjs"))],
-                               input=json.dumps(request).encode(), stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, timeout=40, check=True,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if render_remote is None or not render_remote(runtime, diagram, temp):
+                    run_diagram_renderer(runtime, diagram, temp)
                 temp.replace(png)
             except (OSError, subprocess.SubprocessError) as error:
                 raise ValueError("article_mermaid_render_failed") from error

@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import re
+from tempfile import TemporaryDirectory
 import time
 import unittest
 from datetime import datetime, timezone
@@ -58,6 +59,26 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "renderer_not_configured"):
             diagram_images(nodes, None, "cache", upload, MagicMock())
         upload.assert_not_called()
+
+    def test_diagram_worker_only_computes_cache_misses(self):
+        nodes = [{"text": "Title"}, {"remId": "d", "text": "flowchart LR\na --> b"}]
+        image = {"imageId": "id", "src": "https://picx.zhimg.com/v2-" + "a" * 32 + "_r.jpg",
+                 "width": 1440, "height": 200}
+        upload = MagicMock(return_value=image)
+        read = MagicMock(return_value=image)
+        with TemporaryDirectory() as directory:
+            runtime = {"cache": directory, "mermaidVersion": "11.17.2", "playwrightVersion": "1.63.0"}
+            render = MagicMock(side_effect=lambda runtime, diagram, output: bool(output.write_bytes(b"rendered")))
+            diagram_images(nodes, runtime, "local", upload, read, render)
+            render.assert_called_once()
+            upload.assert_not_called()
+            read.assert_not_called()
+            result = diagram_images(nodes, runtime, "upload", upload, read, render)
+            upload.assert_called_once()
+            self.assertEqual(diagram_images(nodes, runtime, "cache", upload, read, render), result)
+            render.assert_called_once()
+            upload.assert_called_once()
+            read.assert_called_once_with("id")
 
     def test_column_matching_is_exact_and_continues_across_pages(self):
         client = MagicMock()

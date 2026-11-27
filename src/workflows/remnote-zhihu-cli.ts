@@ -68,6 +68,13 @@ const Config = z
         host: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u),
         python: z.string().refine(path.posix.isAbsolute),
         script: z.string().refine(path.posix.isAbsolute),
+        diagramRenderer: z
+          .object({
+            modules: z.string().refine(path.posix.isAbsolute),
+            browserExecutable: z.string().refine(path.posix.isAbsolute),
+            node: z.string().refine(path.posix.isAbsolute),
+          })
+          .optional(),
       })
       .optional(),
     diagrams: z

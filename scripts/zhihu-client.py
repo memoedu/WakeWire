@@ -15,7 +15,7 @@ from requests.cookies import create_cookie
 from PIL import Image
 from zhihu_cli.client import ZHIHU_IMAGE_API, ZhihuClient
 from zhihu_article_diagrams import diagram_images
-from zhihu_layout_worker import compute_layout
+from zhihu_layout_worker import compute_layout, render_worker_diagram
 from zhihu_article_format import (
     ArticleLayout,
     VisibleText,
@@ -496,11 +496,21 @@ def main(request):
                         raise ValueError("account_changed")
                 return client
 
+            worker = request.get("layoutWorker")
+            diagram_worker_available = bool(worker and worker.get("diagramRenderer"))
+
+            def render_remote(runtime, diagram, output):
+                nonlocal diagram_worker_available
+                if diagram_worker_available:
+                    diagram_worker_available = render_worker_diagram(worker, runtime, diagram, output)
+                    return diagram_worker_available
+                return False
+
             diagrams = diagram_images(request["nodes"], request.get("diagrams"), request.get("diagramMode", "cache"),
                                       lambda path: upload_article_image(checked_client(), path),
-                                      lambda image_id: read_article_image(checked_client(), image_id))
+                                      lambda image_id: read_article_image(checked_client(), image_id), render_remote)
             base, execution = compute_layout(request["nodes"], request.get("firstPublishedAt"),
-                                             request.get("aiGeneratedTagRemId"), diagrams, request.get("layoutWorker"))
+                                             request.get("aiGeneratedTagRemId"), diagrams, worker)
             names = mention_names(base["html"])
             bindings = resolve_mentions(checked_client(), names, request.get("mentionBindings", [])) if names else []
             result = finish_prepared(base, request.get("firstPublishedAt"), bindings, request.get("seriesLabel"))
