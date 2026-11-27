@@ -63,6 +63,13 @@ const Config = z
       .optional(),
     requirePreflight: z.boolean().optional(),
     controlledSync: z.boolean().optional(),
+    layoutWorker: z
+      .object({
+        host: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u),
+        python: z.string().refine(path.posix.isAbsolute),
+        script: z.string().refine(path.posix.isAbsolute),
+      })
+      .optional(),
     diagrams: z
       .object({
         modules: z.string().refine(path.isAbsolute),
@@ -280,6 +287,7 @@ export class ZhihuPublisher implements ArticlePublisher {
         ? { aiGeneratedTagRemId: this.config.aiGeneratedTagRemId }
         : {}),
       ...(this.config.mentionBindings ? { mentionBindings: this.config.mentionBindings } : {}),
+      ...(this.config.layoutWorker ? { layoutWorker: this.config.layoutWorker } : {}),
       ...(this.config.diagrams
         ? { diagrams: this.config.diagrams, diagramMode: this.diagramMode }
         : {}),
