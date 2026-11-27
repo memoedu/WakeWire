@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { logsDir } from "../paths.js";
+import { logsDir, wakewireHome } from "../paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,12 +16,16 @@ const LAUNCHD_LABEL = "io.wakewire.daemon";
  */
 export async function installService(cliPath: string): Promise<void> {
   if (process.platform === "darwin") {
+    const domain = `gui/${process.getuid?.()}`;
+    await execFileAsync("launchctl", ["print", domain]);
     const plist = path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
     fs.mkdirSync(path.dirname(plist), { recursive: true });
     fs.mkdirSync(logsDir(), { recursive: true });
     fs.writeFileSync(plist, launchdPlist(cliPath));
-    await execFileAsync("launchctl", ["unload", plist]).catch(() => undefined);
-    await execFileAsync("launchctl", ["load", plist]);
+    await execFileAsync("launchctl", ["bootout", `${domain}/${LAUNCHD_LABEL}`]).catch(
+      () => undefined,
+    );
+    await execFileAsync("launchctl", ["bootstrap", domain, plist]);
     console.log(`Installed and loaded launchd agent: ${plist}`);
     return;
   }
@@ -45,7 +49,10 @@ export async function installService(cliPath: string): Promise<void> {
 export async function uninstallService(): Promise<void> {
   if (process.platform === "darwin") {
     const plist = path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
-    await execFileAsync("launchctl", ["unload", plist]).catch(() => undefined);
+    await execFileAsync("launchctl", [
+      "bootout",
+      `gui/${process.getuid?.()}/${LAUNCHD_LABEL}`,
+    ]).catch(() => undefined);
     fs.rmSync(plist, { force: true });
     console.log(`Removed ${plist}`);
     return;
@@ -63,8 +70,10 @@ export async function uninstallService(): Promise<void> {
 }
 
 function launchdPlist(cliPath: string): string {
-  const stdout = path.join(logsDir(), "launchd.out.log");
-  const stderr = path.join(logsDir(), "launchd.err.log");
+  const plistValue = (value: string) =>
+    value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  const stdout = path.resolve(logsDir(), "launchd.out.log");
+  const stderr = path.resolve(logsDir(), "launchd.err.log");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -72,14 +81,18 @@ function launchdPlist(cliPath: string): string {
   <key>Label</key><string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${process.execPath}</string>
-    <string>${cliPath}</string>
+    <string>${plistValue(process.execPath)}</string>
+    <string>${plistValue(cliPath)}</string>
     <string>start</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>WAKEWIRE_HOME</key><string>${plistValue(path.resolve(wakewireHome()))}</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${stdout}</string>
-  <key>StandardErrorPath</key><string>${stderr}</string>
+  <key>StandardOutPath</key><string>${plistValue(stdout)}</string>
+  <key>StandardErrorPath</key><string>${plistValue(stderr)}</string>
 </dict>
 </plist>
 `;
