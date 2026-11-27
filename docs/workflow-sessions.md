@@ -18,6 +18,8 @@ Private prompt deliveries also read their original turn on the owning connection
 
 On Windows, configure a separate production home, initialize the daemon, set sink.codexPath and sessions.codexPaths, then run scripts/install-windows-service.ps1 from the installed package. It registers the per-user WakeWire logon task using the existing Node runtime and a hidden background host. The task preserves the home path, uses IgnoreNew, and does not start another instance over an existing daemon.
 
+On macOS, choose a separate absolute WAKEWIRE_HOME and configure the same settings using the installed CLI. Run `wakewire service install` as the signed-in desktop user. Installation targets that user's launchd GUI domain and the agent retains the WakeWire home across launches. Supply the same WAKEWIRE_HOME to clients and to `wakewire status`. The daemon listens on loopback.
+
 The KnowledgeClipper connector is helpers/codex_chat.py in D:/Projects/RemNote Quick Clipper. Only its native SDK launch changes; its existing pinned runtime, instructions, images, streaming, cancellation, tabs and export contracts remain intact. The deployed helper is loaded for each request, so verified helper-only updates do not require a desktop-app restart.
 
 The recording connector is src/async_workflow/codex_appserver.py in D:/Projects/AsyncWorkflow. Only recording command execution and exact readback opt into WakeWire. Other sdk_config consumers, including maintenance feedback and the separate command inbox, retain their existing native connection. ASR, Codex Exec content production, classification and RemNote writes are unchanged.
