@@ -15,6 +15,7 @@ from requests.cookies import create_cookie
 from PIL import Image
 from zhihu_cli.client import ZHIHU_IMAGE_API, ZhihuClient
 from zhihu_article_diagrams import diagram_images
+from zhihu_layout_worker import compute_layout
 from zhihu_article_format import (
     ArticleLayout,
     VisibleText,
@@ -57,6 +58,10 @@ def validate_links(html):
 
 def prepare(nodes, first_published_at=None, ai_generated_tag_rem_id=None, mention_bindings=None, series_label=None, diagrams=None):
     result = prepare_layout(nodes, first_published_at, ai_generated_tag_rem_id, diagrams)
+    return finish_prepared(result, first_published_at, mention_bindings, series_label)
+
+
+def finish_prepared(result, first_published_at, mention_bindings, series_label):
     if series_label is not None:
         if not isinstance(series_label, str) or not re.fullmatch(r"第[1-9]\d* 篇 \| day [1-9]\d*", series_label) or first_published_at is None:
             raise ValueError("article_series_footer_invalid")
@@ -494,11 +499,13 @@ def main(request):
             diagrams = diagram_images(request["nodes"], request.get("diagrams"), request.get("diagramMode", "cache"),
                                       lambda path: upload_article_image(checked_client(), path),
                                       lambda image_id: read_article_image(checked_client(), image_id))
-            base = prepare_layout(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), diagrams)
+            base, execution = compute_layout(request["nodes"], request.get("firstPublishedAt"),
+                                             request.get("aiGeneratedTagRemId"), diagrams, request.get("layoutWorker"))
             names = mention_names(base["html"])
             bindings = resolve_mentions(checked_client(), names, request.get("mentionBindings", [])) if names else []
-            result = prepare(request["nodes"], request.get("firstPublishedAt"), request.get("aiGeneratedTagRemId"), bindings, request.get("seriesLabel"), diagrams)
-        validate_links(result["html"])
+            result = finish_prepared(base, request.get("firstPublishedAt"), bindings, request.get("seriesLabel"))
+            if execution:
+                result["layoutExecution"] = execution
         return result
     with load_client(request["snapshotPath"]) as client:
         me = client.get_self_info()
