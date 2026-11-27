@@ -1,8 +1,12 @@
 import json
+from pathlib import Path
+import struct
 import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+import zlib
 
 import zhihu_layout_worker as worker
 
@@ -51,3 +55,42 @@ class LayoutWorkerTests(unittest.TestCase):
         for changes in ({"host": "-V"}, {"script": "/tmp/something-else"}, {"python": "relative"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 worker.checked_command({**self.remote, **changes})
+
+    def test_diagram_bindings_and_invalid_response_preserve_local_fallback(self):
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1440, 80, 8, 0, 0, 0, 0))
+               + chunk(b"IDAT", zlib.compress(bytes(1441 * 80))) + chunk(b"IEND", b""))
+        runtime = {"mermaidVersion": "11.17.2", "playwrightVersion": "1.63.0", "cache": "never transferred"}
+        remote = {**self.remote, "diagramRenderer": {
+            "node": "/tooling/bin/node", "modules": "/modules", "browserExecutable": "/Chrome executable",
+        }}
+        diagram = "flowchart LR\na --> b"
+
+        def transport(command, *, input, **kwargs):
+            self.assertIn("StrictHostKeyChecking=yes", command)
+            self.assertTrue(command[-1].endswith(" --diagram"))
+            payload = json.loads(input)
+            self.assertEqual(set(payload), {"diagram", "runtime", "rendererId"})
+            self.assertEqual(set(payload["runtime"]),
+                             {"node", "modules", "browserExecutable", "mermaidVersion", "playwrightVersion"})
+            with patch.object(worker, "run_diagram_renderer", side_effect=lambda runtime, diagram, output: output.write_bytes(png)):
+                return worker.serve_diagram(input)
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "verified.png"
+            with patch.object(subprocess, "run",
+                              side_effect=lambda *args, **kwargs: SimpleNamespace(stdout=transport(*args, **kwargs))):
+                self.assertTrue(worker.render_worker_diagram(remote, runtime, diagram, output))
+            self.assertEqual(output.read_bytes(), png)
+            for method in ("hash", "truncated"):
+                def unverified(command, **kwargs):
+                    data = transport(command, **kwargs)
+                    return SimpleNamespace(stdout=data[:-1] if method == "truncated" else
+                                           data.replace(worker.digest(png).encode(), b"0" * 64, 1))
+                with self.subTest(method=method), patch.object(subprocess, "run", side_effect=unverified):
+                    self.assertFalse(worker.render_worker_diagram(remote, runtime, diagram, output))
+                    self.assertEqual(output.read_bytes(), png)
+            with patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("ssh", 35)):
+                self.assertFalse(worker.render_worker_diagram(remote, runtime, diagram, output))
